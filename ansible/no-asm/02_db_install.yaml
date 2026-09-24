@@ -1,0 +1,126 @@
+---
+- name: Kompletna instalacja Oracle 19c (Silnik RDBMS + Baza CDB/PDB)
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    db_zip_dest: "/u01/LINUX.X64_193000_db_home.zip"
+    oracle_base: "/u01/app/oracle"
+    oracle_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
+    ora_inventory: "/u01/app/oraInventory"
+    
+    db_name: "CDB1"
+    sys_password: "SysPassword123!" 
+    data_dest: "/u02"
+    fra_dest: "/u05"
+
+  pre_tasks:
+    - name: Przełączenie interpretera Ansible na Pythona 3.9
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.9
+
+  tasks:
+    - name: Utworzenie struktury katalogów dla bazy i inventory
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0775'
+        recurse: yes
+      loop:
+        - "{{ oracle_home }}"
+        - "{{ ora_inventory }}"
+
+    - name: Rozpakowanie pliku zip bezpośrednio do ORACLE_HOME
+      unarchive:
+        src: "{{ db_zip_dest }}"
+        dest: "{{ oracle_home }}"
+        owner: oracle
+        group: oinstall
+        remote_src: yes
+        creates: "{{ oracle_home }}/runInstaller"
+
+    - name: Usunięcie pliku zip po rozpakowaniu (oszczędność miejsca na /u01)
+      file:
+        path: "{{ db_zip_dest }}"
+        state: absent
+
+    - name: Wygenerowanie pliku odpowiedzi (Response File) dla trybu Silent
+      copy:
+        dest: "/home/oracle/db_install.rsp"
+        owner: oracle
+        group: oinstall
+        mode: '0644'
+        content: |
+          oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
+          oracle.install.option=INSTALL_DB_SWONLY
+          UNIX_GROUP_NAME=oinstall
+          INVENTORY_LOCATION={{ ora_inventory }}
+          ORACLE_HOME={{ oracle_home }}
+          ORACLE_BASE={{ oracle_base }}
+          oracle.install.db.InstallEdition=EE
+          oracle.install.db.OSDBA_GROUP=dba
+          oracle.install.db.OSOPER_GROUP=dba
+          oracle.install.db.OSBACKUPDBA_GROUP=dba
+          oracle.install.db.OSDGDBA_GROUP=dba
+          oracle.install.db.OSKMDBA_GROUP=dba
+          oracle.install.db.OSRACDBA_GROUP=dba
+
+    - name: Cicha instalacja silnika RDBMS (uruchamiane jako oracle)
+      become_user: oracle
+      command: >
+        {{ oracle_home }}/runInstaller -silent -waitforcompletion -responseFile /home/oracle/db_install.rsp -ignorePrereqFailure
+      environment:
+        CV_ASSUME_DISTID: "OEL7.6"
+      register: install_output
+      failed_when: install_output.rc not in [0, 6]
+      creates: "{{ oracle_home }}/bin/sqlplus"
+
+    - name: Wykonanie skryptu orainstRoot.sh
+      command: "{{ ora_inventory }}/orainstRoot.sh"
+      register: orainst_out
+      changed_when: true
+      args:
+        creates: /etc/oraInst.loc
+
+    - name: Wykonanie skryptu root.sh dla bazy danych
+      command: "{{ oracle_home }}/root.sh"
+      register: root_out
+      changed_when: true
+      args:
+        creates: /usr/local/bin/oraenv
+
+    - name: Utworzenie bazy danych CDB z 3 PDB (może potrwać 15-30 minut)
+      become_user: oracle
+      command: >
+        {{ oracle_home }}/bin/dbca -silent -createDatabase
+        -templateName General_Purpose.dbc
+        -gdbname {{ db_name }} -sid {{ db_name }}
+        -createAsContainerDatabase true
+        -numberOfPDBs 3
+        -pdbName PDB
+        -sysPassword {{ sys_password }}
+        -systemPassword {{ sys_password }}
+        -pdbAdminPassword {{ sys_password }}
+        -datafileDestination {{ data_dest }}
+        -recoveryAreaDestination {{ fra_dest }}
+        -recoveryAreaSize 8192
+        -storageType FS
+        -characterSet AL32UTF8
+        -memoryPercentage 40
+        -emConfiguration NONE
+        -ignorePreReqs
+      environment:
+        CV_ASSUME_DISTID: "OEL7.6"
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_BASE: "{{ oracle_base }}"
+      register: dbca_output
+      failed_when: "'100% complete' not in dbca_output.stdout and dbca_output.rc != 0"
+      creates: "{{ oracle_home }}/dbs/spfile{{ db_name }}.ora"
+
+    - name: Weryfikacja działania bazy i procesów tła (PMON)
+      shell: "ps -ef | grep pmon_{{ db_name }} | grep -v grep"
+      register: pmon_check
+      changed_when: false
+      failed_when: "db_name not in pmon_check.stdout"

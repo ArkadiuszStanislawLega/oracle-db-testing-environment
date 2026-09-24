@@ -1,0 +1,81 @@
+---
+- name: Montowanie koszyków S3 w systemie plików (s3fs)
+  hosts: all
+  become: yes
+  vars:
+    s3_golden: "oracle-golden-images-terraform"
+    s3_backup: "oracle-test-backups-terraform"
+    
+    mount_golden: "/golden_images"
+    mount_backup: "/backup"
+
+  tasks:
+    - name: Instalacja repozytorium EPEL (wymagane dla s3fs-fuse na OEL 8)
+      dnf:
+        name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+        state: present
+        disable_gpg_check: yes
+
+    - name: Instalacja narzędzia s3fs-fuse
+      dnf:
+        name: s3fs-fuse
+        state: present
+
+    - name: Pobranie systemowego UID użytkownika oracle
+      command: id -u oracle
+      register: oracle_uid
+      changed_when: false
+
+    - name: Pobranie systemowego GID grupy oinstall
+      command: id -g oracle
+      register: oinstall_gid
+      changed_when: false
+
+    - name: Utworzenie katalogów pod punkty montowania S3
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0775'
+      loop:
+        - "{{ mount_golden }}"
+        - "{{ mount_backup }}"
+
+    - name: Upewnienie się, że moduł FUSE jest załadowany w jądrze
+      modprobe:
+        name: fuse
+        state: present
+
+    - name: Utworzenie katalogów pod punkty montowania S3
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: oracle
+        group: oinstall
+        mode: '0775'
+      loop:
+        - "{{ mount_golden }}"
+        - "{{ mount_backup }}"
+
+    - name: Utworzenie dowiązania symbolicznego dla helpera mount.s3fs (Fix dla OEL 8)
+      file:
+        src: /usr/bin/s3fs
+        dest: /sbin/mount.s3fs
+        state: link
+
+    - name: Montowanie trwałego S3 (Golden Images) i dodanie do /etc/fstab
+      mount:
+        path: "{{ mount_golden }}"
+        src: "{{ s3_golden }}"
+        fstype: s3fs
+        opts: "_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ oracle_uid.stdout }},gid={{ oinstall_gid.stdout }},umask=022"
+        state: mounted
+
+    - name: Montowanie ulotnego S3 (Test Backups) i dodanie do /etc/fstab
+      mount:
+        path: "{{ mount_backup }}"
+        src: "{{ s3_backup }}"
+        fstype: s3fs
+        opts: "_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ oracle_uid.stdout }},gid={{ oinstall_gid.stdout }},umask=022"
+        state: mounted    

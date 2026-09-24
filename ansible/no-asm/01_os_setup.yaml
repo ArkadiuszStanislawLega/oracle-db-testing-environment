@@ -1,0 +1,117 @@
+---
+- name: Przygotowanie OS i dysków LVM dla Oracle 19c
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    oracle_volumes:
+      - { device: "/dev/nvme1n1", vg: "u01vg", lv: "u01lv", mount: "/u01" }
+      - { device: "/dev/nvme2n1", vg: "u02vg", lv: "u02lv", mount: "/u02" }
+      - { device: "/dev/nvme3n1", vg: "u03vg", lv: "u03lv", mount: "/u03" }
+      - { device: "/dev/nvme4n1", vg: "u04vg", lv: "u04lv", mount: "/u04" }
+      - { device: "/dev/nvme5n1", vg: "u05vg", lv: "u05lv", mount: "/u05" }
+    
+  pre_tasks:
+    - name: Bootstrap - Instalacja Python 3.9 via RAW SSH (dla kompatybilności z Twoim Ansible)
+      raw: dnf install -y python39
+
+    - name: Przełączenie interpretera Ansible na nowego Pythona
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.9
+
+    - name: Ręczne zebranie faktów
+      setup:
+
+  tasks:
+    - name: Instalacja niezbędnych pakietów (w tym Oracle Preinstall i LVM2)
+      dnf:
+        name:
+          - oracle-database-preinstall-19c
+          - lvm2
+          - kmod
+          - libnsl
+          - net-tools
+          - psmisc
+          - vim
+          - tmux
+          - wget
+          - unzip
+          - rlwrap
+        state: present
+
+    - name: Utworzenie katalogów punktów montowania (/u01 - /u05)
+      file:
+        path: "{{ item.mount }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ oracle_volumes }}"
+
+    - name: Utworzenie grup wolumenów (VG) na dyskach NVMe
+      lvg:
+        vg: "{{ item.vg }}"
+        pvs: "{{ item.device }}"
+      loop: "{{ oracle_volumes }}"
+
+    - name: Utworzenie wolumenów logicznych (LV) zajmujących 100% VG
+      lvol:
+        vg: "{{ item.vg }}"
+        lv: "{{ item.lv }}"
+        size: 100%FREE
+      loop: "{{ oracle_volumes }}"
+
+    - name: Formatowanie wolumenów LVM jako XFS
+      filesystem:
+        fstype: xfs
+        dev: "/dev/{{ item.vg }}/{{ item.lv }}"
+      loop: "{{ oracle_volumes }}"
+
+    - name: Montowanie dysków i dodanie wpisów do /etc/fstab
+      mount:
+        path: "{{ item.mount }}"
+        src: "/dev/{{ item.vg }}/{{ item.lv }}"
+        fstype: xfs
+        opts: defaults
+        state: mounted
+      loop: "{{ oracle_volumes }}"
+
+    - name: Zmiana właściciela punktów montowania dla Oracle
+      file:
+        path: "{{ item.mount }}"
+        owner: oracle
+        group: oinstall
+        state: directory
+        recurse: yes
+      loop: "{{ oracle_volumes }}"
+
+    - name: Globalna konfiguracja bash (tryb vi, aliasy)
+      copy:
+        dest: /etc/profile.d/custom_env.sh
+        content: |
+          set -o vi
+          alias ll='ls -lah'
+          alias l='ll'
+        mode: '0755'
+
+    - name: Globalna konfiguracja tmux
+      copy:
+        dest: /etc/tmux.conf
+        content: |
+          set -g mouse off
+          set -g mode-keys vi
+          bind h split-window -h -c "#{pane_current_path}"
+          bind v split-window -v -c "#{pane_current_path}"
+        mode: '0644'
+
+    - name: Wygenerowanie poprawnego .bash_profile dla usera oracle
+      blockinfile:
+        path: /home/oracle/.bash_profile
+        create: yes
+        owner: oracle
+        group: oinstall
+        marker: "# {mark} ORACLE ENV"
+        content: |
+          export ORACLE_SID=CDB1
+          export ORACLE_BASE=/u01/app/oracle
+          export ORACLE_HOME=/u01/app/oracle/product/19.3.0/dbhome_1
+          export PATH=$ORACLE_HOME/bin:$PATH
+          export CV_ASSUME_DISTID=OEL7.6
