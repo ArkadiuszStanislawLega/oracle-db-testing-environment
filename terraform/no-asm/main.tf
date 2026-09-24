@@ -92,7 +92,7 @@ resource "aws_security_group" "oracle_ssh_sg" {
 }
 
 resource "aws_instance" "oracle_db" {
-  ami           = "ami-06a887bca591498b2"
+  ami           = "ami-0ed4536c42a475e85"
   instance_type = "r6a.2xlarge"
   key_name      = "oracle" 
   vpc_security_group_ids = [aws_security_group.oracle_ssh_sg.id]
