@@ -1,0 +1,77 @@
+---
+- name: Post-konfiguracja Oracle 19c (Logi na u02, PDB x3, RMAN do S3)
+  hosts: all
+  become: yes
+  become_user: oracle
+  gather_facts: no
+  vars:
+    oracle_base: "/u01/app/oracle"
+    db_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
+    u02_base: "/u02/app/oracle"
+
+  tasks:
+    - name: Utworzenie nowej struktury katalogów na partycji LVM (/u02) i S3 (/backup)
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0775'
+      loop:
+        - "{{ u02_base }}/diag"
+        - "{{ u02_base }}/audit"
+        - "/u02/backup_logs"
+        - "/backup/CDB1/rman_backups"
+        - "/backup/CDB1/autobackup"
+
+    - name: Zmiana ścieżek dla logów diagnostycznych i audytowych w bazie (na /u02)
+      shell: |
+        source ~/.bashrc
+        dbenv
+        sqlplus -s / as sysdba <<EOF
+        ALTER SYSTEM SET diagnostic_dest='{{ u02_base }}' SCOPE=BOTH;
+        ALTER SYSTEM SET audit_file_dest='{{ u02_base }}/audit' SCOPE=SPFILE;
+        EXIT;
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: Restart instancji (wymagany do zatwierdzenia zmiany ścieżki audytu)
+      shell: |
+        source ~/.bashrc
+        dbenv
+        sqlplus -s / as sysdba <<EOF
+        SHUTDOWN IMMEDIATE;
+        STARTUP;
+        EXIT;
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: Dorobienie instancji PDB (PDB2 i PDB3) do pełnych 3 sztuk
+      shell: |
+        source ~/.bashrc
+        dbenv
+        sqlplus -s / as sysdba <<EOF
+        -- PDB1 zostało utworzone automatycznie przez DBCA
+        CREATE PLUGGABLE DATABASE PDB2 ADMIN USER pdbadmin IDENTIFIED BY "SysPassword123!";
+        CREATE PLUGGABLE DATABASE PDB3 ADMIN USER pdbadmin IDENTIFIED BY "SysPassword123!";
+        ALTER PLUGGABLE DATABASE ALL OPEN;
+        ALTER PLUGGABLE DATABASE ALL SAVE STATE;
+        EXIT;
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: Konfiguracja domyślnych parametrów RMAN (cel - koszyk S3)
+      shell: |
+        source ~/.bashrc
+        dbenv
+        rman target / <<EOF
+        CONFIGURE DEFAULT DEVICE TYPE TO DISK;
+        CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '/backup/CDB1/rman_backups/bkp_%U';
+        CONFIGURE CONTROLFILE AUTOBACKUP ON;
+        CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '/backup/CDB1/autobackup/ctl_%F';
+        CONFIGURE DEVICE TYPE DISK PARALLELISM 2 BACKUP TYPE TO COMPRESSED BACKUPSET;
+        EXIT;
+        EOF
+      args:
+        executable: /bin/bash

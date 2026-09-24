@@ -63,13 +63,13 @@
         src: /usr/bin/s3fs
         dest: /sbin/mount.s3fs
         state: link
-
+        
     - name: Montowanie trwałego S3 (Golden Images) i dodanie do /etc/fstab
       mount:
         path: "{{ mount_golden }}"
         src: "{{ s3_golden }}"
         fstype: s3fs
-        opts: "_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ oracle_uid.stdout }},gid={{ oinstall_gid.stdout }},umask=022"
+        opts: "_netdev,allow_other,iam_role=oracle_ec2_s3_role_asm,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ oracle_uid.stdout }},gid={{ oinstall_gid.stdout }},umask=022,connect_timeout=5,retries=3"
         state: mounted
 
     - name: Montowanie ulotnego S3 (Test Backups) i dodanie do /etc/fstab
@@ -77,5 +77,5 @@
         path: "{{ mount_backup }}"
         src: "{{ s3_backup }}"
         fstype: s3fs
-        opts: "_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ oracle_uid.stdout }},gid={{ oinstall_gid.stdout }},umask=022"
-        state: mounted    
+        opts: "_netdev,allow_other,iam_role=oracle_ec2_s3_role_asm,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ oracle_uid.stdout }},gid={{ oinstall_gid.stdout }},umask=022,connect_timeout=5,retries=3"
+        state: mounted
