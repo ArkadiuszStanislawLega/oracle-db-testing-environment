@@ -1,26 +1,24 @@
 ---
-- name: Przygotowanie OS, LVM i dysków RAW dla Oracle ASM
+- name: Zero to DB - Kompletny Provisioning Oracle 19c na AWS ASM
   hosts: all
   become: yes
   gather_facts: no
   vars:
-    # LVM tylko dla binariów i logów (dyski 50GB i 10GB)
-    lvm_volumes:
-      - { device: "/dev/nvme1n1", vg: "u01vg", lv: "u01lv", mount: "/u01" }
-      - { device: "/dev/nvme2n1", vg: "u02vg", lv: "u02lv", mount: "/u02" }
+    s3_golden: "oracle-golden-images-terraform"
+    s3_backup: "oracle-test-backups-terraform-asm"
+    mount_golden: "/golden_images"
+    mount_backup: "/backup"
     
-    # Dyski pod ASM (Zostają surowe - konfigurujemy tylko UDEV)
-    # nvme3 do nvme6 to +DATA (4x10GB), nvme7 i nvme8 to +RECOVERY (2x5GB)
-    asm_disks:
-      - "nvme3n1"
-      - "nvme4n1"
-      - "nvme5n1"
-      - "nvme6n1"
-      - "nvme7n1"
-      - "nvme8n1"
+    grid_zip_src: "/golden_images/LINUX.X64_193000_grid_home.zip"
+    db_zip_src: "/golden_images/LINUX.X64_193000_db_home.zip"
+    
+    oracle_base: "/u01/app/oracle"
+    ora_inventory: "/u01/app/oraInventory"
+    grid_home: "/u01/app/oracle/product/19.3.0/grid"
+    db_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
 
   pre_tasks:
-    - name: Bootstrap - Instalacja Python 3.9 via RAW SSH
+    - name: Bootstrap - Instalacja Python 3.9
       raw: dnf install -y python39
 
     - name: Przełączenie interpretera Ansible na Pythona 3.9
@@ -31,10 +29,44 @@
       setup:
 
   tasks:
-    - name: Instalacja niezbędnych pakietów (Oracle Preinstall i LVM)
+    # ================== 1. DYNAMICZNE MAPOWANIE DYSKÓW ==================
+    - name: Rozpoznanie dysku 50GB (LVM Binaria)
+      shell: lsblk -dn -b -o NAME,SIZE | awk '$2 == 53687091200 {print $1}' | sort | head -n 1
+      register: d_50g
+      changed_when: false
+
+    - name: Rozpoznanie dysków 10GB (1 na LVM Logi, 4 na ASM +DATA)
+      shell: lsblk -dn -b -o NAME,SIZE | awk '$2 == 10737418240 {print $1}' | sort
+      register: d_10g
+      changed_when: false
+
+    - name: Rozpoznanie dysków 5GB (ASM +RECOVERY)
+      shell: lsblk -dn -b -o NAME,SIZE | awk '$2 == 5368709120 {print $1}' | sort
+      register: d_5g
+      changed_when: false
+
+    - name: Przydzielenie list urządzeń
+      set_fact:
+        lvm_volumes:
+          - { device: "/dev/{{ d_50g.stdout }}", vg: "u01vg", lv: "u01vg", mount: "/u01" }
+          - { device: "/dev/{{ d_10g.stdout_lines[0] }}", vg: "u02vg", lv: "u02lv", mount: "/u02" }
+        asm_all_raw: "{{ d_10g.stdout_lines[1:] + d_5g.stdout_lines }}"
+        asm_data_list: "{{ d_10g.stdout_lines[1:] | map('regex_replace', '^(.*)$', '/dev/\\1') | join(',') }}"
+        asm_rec_list: "{{ d_5g.stdout_lines | map('regex_replace', '^(.*)$', '/dev/\\1') | join(',') }}"
+
+    # ================== 2. OS PAKIETY, FIXY I GRUPY ==================
+    - name: Instalacja repozytorium EPEL
+      dnf:
+        name: https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+        state: present
+        disable_gpg_check: yes
+
+    - name: Instalacja pakietów OS, udev, s3fs, lvm oraz starych bibliotek OL7 (FIX ohasd)
       dnf:
         name:
           - oracle-database-preinstall-19c
+          - https://yum.oracle.com/repo/OracleLinux/OL7/latest/x86_64/getPackage/compat-libcap1-1.10-7.el7.x86_64.rpm
+          - policycoreutils-python-utils
           - lvm2
           - kmod
           - libnsl
@@ -42,104 +74,240 @@
           - psmisc
           - vim
           - tmux
-          - wget
           - unzip
           - rlwrap
+          - s3fs-fuse
+          - fuse
         state: present
+        disable_gpg_check: yes
 
-    # --- Konfiguracja Grup i Użytkowników dla Grid Infrastructure ---
-    - name: Dodanie grup administracyjnych dla ASM
-      group:
-        name: "{{ item }}"
-        state: present
-      loop:
-        - asmadmin
-        - asmdba
-        - asmoper
+    - name: Dodanie grup ASM i DBA
+      group: name="{{ item }}" state=present
+      loop: [asmadmin, asmdba, asmoper, dba, oper, backupdba, dgdba, kmdba, racdba]
 
-    - name: Dodanie użytkownika oracle (stworzonego przez preinstall) do grup ASM
-      user:
-        name: oracle
-        groups: asmadmin,asmdba,asmoper
-        append: yes
+    - name: Konfiguracja użytkownika oracle
+      user: name=oracle groups=asmadmin,asmdba,asmoper,dba,oper,backupdba,dgdba,kmdba,racdba append=yes
 
-    # --- Konfiguracja LVM (TYLKO u01 i u02) ---
-    - name: Utworzenie katalogów punktów montowania dla LVM
-      file:
-        path: "{{ item.mount }}"
-        state: directory
-        mode: '0755'
-      loop: "{{ lvm_volumes }}"
+    - name: Pobranie systemowych ID
+      command: id -{{ item }} oracle
+      register: ids
+      loop: ['u', 'g']
+      changed_when: false
 
-    - name: Utworzenie grup wolumenów (VG) na wybranych dyskach NVMe
-      lvg:
-        vg: "{{ item.vg }}"
-        pvs: "{{ item.device }}"
-      loop: "{{ lvm_volumes }}"
+    # ================== 3. LVM I UDEV ==================
+    - name: Utworzenie punktów LVM i montowanie
+      block:
+        - file: path="{{ item.mount }}" state=directory mode='0755'
+          loop: "{{ lvm_volumes }}"
+        - lvg: vg="{{ item.vg }}" pvs="{{ item.device }}"
+          loop: "{{ lvm_volumes }}"
+        - lvol: vg="{{ item.vg }}" lv="{{ item.lv }}" size=100%FREE
+          loop: "{{ lvm_volumes }}"
+        - filesystem: fstype=xfs dev="/dev/{{ item.vg }}/{{ item.lv }}"
+          loop: "{{ lvm_volumes }}"
+        - mount: path="{{ item.mount }}" src="/dev/{{ item.vg }}/{{ item.lv }}" fstype=xfs opts=defaults state=mounted
+          loop: "{{ lvm_volumes }}"
+        - file: path="{{ item.mount }}" owner=oracle group=oinstall state=directory recurse=yes
+          loop: "{{ lvm_volumes }}"
 
-    - name: Utworzenie wolumenów logicznych (LV) zajmujących 100% VG
-      lvol:
-        vg: "{{ item.vg }}"
-        lv: "{{ item.lv }}"
-        size: 100%FREE
-      loop: "{{ lvm_volumes }}"
-
-    - name: Formatowanie wolumenów LVM jako XFS
-      filesystem:
-        fstype: xfs
-        dev: "/dev/{{ item.vg }}/{{ item.lv }}"
-      loop: "{{ lvm_volumes }}"
-
-    - name: Montowanie dysków i dodanie wpisów do /etc/fstab
-      mount:
-        path: "{{ item.mount }}"
-        src: "/dev/{{ item.vg }}/{{ item.lv }}"
-        fstype: xfs
-        opts: defaults
-        state: mounted
-      loop: "{{ lvm_volumes }}"
-
-    - name: Zmiana właściciela punktów montowania LVM dla Oracle
-      file:
-        path: "{{ item.mount }}"
-        owner: oracle
-        group: oinstall
-        state: directory
-        recurse: yes
-      loop: "{{ lvm_volumes }}"
-
-    # --- Konfiguracja UDEV dla surowych dysków ASM ---
-    - name: Utworzenie reguł udev dla dysków pod ASM
+    - name: Utworzenie i przeładowanie reguł udev
       copy:
         dest: /etc/udev/rules.d/99-oracle-asmdevices.rules
         content: |
-          # Reguły nadające uprawnienia do surowych dysków dla demona ASM
-          {% for disk in asm_disks %}
+          {% for disk in asm_all_raw %}
           KERNEL=="{{ disk }}", OWNER="oracle", GROUP="asmadmin", MODE="0660"
           {% endfor %}
         mode: '0644'
-
-    - name: Przeładowanie reguł udev (aplikacja uprawnień bez restartu)
-      shell: udevadm control --reload-rules && udevadm trigger
+    - shell: udevadm control --reload-rules && udevadm trigger
       changed_when: true
 
-    # --- Zmienne Środowiskowe dla ułatwienia pracy z ASM/CDB ---
-    - name: Wygenerowanie .bash_profile dla usera oracle (wsparcie dla ASM i CDB)
-      blockinfile:
-        path: /home/oracle/.bash_profile
-        create: yes
+    # ================== 4. S3FS MOUNT ==================
+    - name: Montowanie S3 Golden i Backup
+      block:
+        - modprobe: name=fuse state=present
+        - file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775'
+          loop: ["{{ mount_golden }}", "{{ mount_backup }}"]
+        - file: src=/usr/bin/s3fs dest=/sbin/mount.s3fs state=link
+        - mount: path="{{ mount_golden }}" src="{{ s3_golden }}" fstype=s3fs opts="_netdev,allow_other,iam_role=oracle_ec2_s3_role_asm,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
+        - mount: path="{{ mount_backup }}" src="{{ s3_backup }}" fstype=s3fs opts="_netdev,allow_other,iam_role=oracle_ec2_s3_role_asm,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
+
+    # ================== 5. GRID INFRASTRUCTURE ==================
+    - name: Tworzenie katalogów Grid i Inventory
+      file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775' recurse=yes
+      loop: ["{{ grid_home }}", "{{ ora_inventory }}"]
+
+    - name: Rozpakowanie binariów Grid
+      unarchive: src="{{ grid_zip_src }}" dest="{{ grid_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ grid_home }}/gridSetup.sh"
+
+    - name: Instalacja pakietu cvuqdisk
+      dnf: name="{{ grid_home }}/cv/rpm/cvuqdisk-1.0.10-1.rpm" state=present disable_gpg_check=yes
+      environment: { CVUQDISK_GRP: "oinstall" }
+
+    - name: Generowanie odpowiedzi Grid Setup
+      copy:
+        dest: "/home/oracle/grid_install.rsp"
         owner: oracle
         group: oinstall
-        marker: "# {mark} ORACLE ENV"
         content: |
-          export ORACLE_BASE=/u01/app/oracle
-          export GRID_HOME=/u01/app/19.3.0/grid
-          export DB_HOME=/u01/app/oracle/product/19.3.0/dbhome_1
+          oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+          oracle.install.option=HA_CONFIG
+          ORACLE_BASE={{ oracle_base }}
+          INVENTORY_LOCATION={{ ora_inventory }}
+          oracle.install.asm.OSDBA=asmdba
+          oracle.install.asm.OSOPER=asmoper
+          oracle.install.asm.OSASM=asmadmin
+          oracle.install.asm.diskGroup.name=DATA
+          oracle.install.asm.diskGroup.redundancy=EXTERNAL
+          oracle.install.asm.diskGroup.AUSize=4
+          oracle.install.asm.diskGroup.diskDiscoveryString=/dev/nvme*
+          oracle.install.asm.diskGroup.disks={{ asm_data_list }}
+          oracle.install.asm.configureGIMRDataDG=false
+          oracle.install.asm.monitorPassword=SysPassword123!
+          oracle.install.asm.SYSASMPassword=SysPassword123!
+
+    - name: Uruchomienie Grid Setup (+DATA)
+      become_user: oracle
+      command: "{{ grid_home }}/gridSetup.sh -silent -waitforcompletion -responseFile /home/oracle/grid_install.rsp -ignorePrereqFailure"
+      environment: { CV_ASSUME_DISTID: "OEL7.6" }
+      register: grid_setup_output
+      failed_when: grid_setup_output.rc not in [0, 6]
+      args: { creates: "{{ ora_inventory }}/orainstRoot.sh" }
+
+    - name: Wykonanie skryptu orainstRoot.sh
+      command: "{{ ora_inventory }}/orainstRoot.sh"
+      args: { creates: "/etc/oraInst.loc" }
+
+    - name: Wstrzyknięcie zmiennej do systemd (FIX ohasd timeout OEL8)
+      command: systemctl set-environment CV_ASSUME_DISTID=OEL7.6
+      changed_when: true
+
+    - name: Wyłączenie SELinux na stałe w pliku config
+      lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: SELINUX=permissive
+
+    - name: Wyłączenie SELinux w locie
+      shell: setenforce 0
+      failed_when: false
+
+    - name: Wykonanie skryptu root.sh dla Grida
+      command: "{{ grid_home }}/root.sh"
+      environment: { CV_ASSUME_DISTID: "OEL7.6" }
+      args: { creates: "/etc/oracle/olr.loc" }
+
+    - name: Konfiguracja asystentów Grida (utworzenie instancji ASM, Listenera i grupy +DATA)
+      become_user: oracle
+      command: "{{ grid_home }}/gridSetup.sh -executeConfigTools -silent -responseFile /home/oracle/grid_install.rsp"
+      environment: { CV_ASSUME_DISTID: "OEL7.6" }
+      register: grid_config_tools
+      failed_when: grid_config_tools.rc not in [0, 6]
+      args:
+        creates: "{{ grid_home }}/network/admin/listener.ora"
+
+    - name: Utworzenie grupy dyskowej +RECOVERY w ASM
+      become_user: oracle
+      command: "{{ grid_home }}/bin/asmca -silent -createDiskGroup -diskGroupName RECOVERY -diskList {{ asm_rec_list }} -redundancy EXTERNAL"
+      environment:
+        ORACLE_HOME: "{{ grid_home }}"
+        ORACLE_SID: "+ASM"
+      register: asmca_output
+      failed_when: "asmca_output.rc != 0 and 'already exists' not in asmca_output.stdout"
+
+    # ================== 6. SILNIK RDBMS I CDB ==================
+    - name: Utworzenie katalogu DB_HOME
+      file: path="{{ db_home }}" state=directory owner=oracle group=oinstall mode='0775' recurse=yes
+
+    - name: Rozpakowanie binariów RDBMS
+      unarchive: src="{{ db_zip_src }}" dest="{{ db_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ db_home }}/runInstaller"
+
+    - name: Generowanie odpowiedzi dla DB Setup
+      copy:
+        dest: "/home/oracle/db_install.rsp"
+        owner: oracle
+        group: oinstall
+        content: |
+          oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
+          oracle.install.option=INSTALL_DB_SWONLY
+          UNIX_GROUP_NAME=oinstall
+          INVENTORY_LOCATION=/u01/app/oraInventory
+          ORACLE_BASE={{ oracle_base }}
+          ORACLE_HOME={{ db_home }}
+          oracle.install.db.InstallEdition=SE2
+          oracle.install.db.OSDBA_GROUP=dba
+          oracle.install.db.OSOPER_GROUP=oper
+          oracle.install.db.OSBACKUPDBA_GROUP=backupdba
+          oracle.install.db.OSDGDBA_GROUP=dgdba
+          oracle.install.db.OSKMDBA_GROUP=kmdba
+          oracle.install.db.OSRACDBA_GROUP=racdba
+
+    - name: Cicha instalacja RDBMS (Software Only)
+      become_user: oracle
+      shell: |
+        {{ db_home }}/runInstaller -silent -waitforcompletion -responseFile /home/oracle/db_install.rsp -ignorePrereqFailure
+        RC=$?
+        if [ $RC -eq 0 ] || [ $RC -eq 6 ]; then
+          touch {{ db_home }}/.ansible_db_installed
+          exit 0
+        else
+          exit $RC
+        fi
+      environment: { CV_ASSUME_DISTID: "OEL7.6" }
+      args:
+        creates: "{{ db_home }}/.ansible_db_installed"
+        executable: /bin/bash
+
+    - name: Wykonanie skryptu root.sh dla bazy danych
+      command: "{{ db_home }}/root.sh"
+      changed_when: true
+
+    - name: Tworzenie instancji Container Database (CDB1)
+      become_user: oracle
+      command: >
+        {{ db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc
+        -gdbname CDB1 -sid CDB1 -responseFile NO_VALUE -characterSet AL32UTF8
+        -sysPassword SysPassword123! -systemPassword SysPassword123!
+        -createAsContainerDatabase true -numberOfPDBs 1 -pdbName PDB1
+        -pdbAdminPassword SysPassword123! -databaseType MULTIPURPOSE
+        -automaticMemoryManagement false -totalMemory 4096
+        -storageType ASM -diskGroupName +DATA -recoveryGroupName +RECOVERY
+        -recoveryAreaSize 8912 -asmsnmpPassword SysPassword123!
+      environment:
+        ORACLE_HOME: "{{ db_home }}"
+        ORACLE_SID: "CDB1"
+        PATH: "{{ db_home }}/bin:/usr/local/bin:/bin:/usr/bin"
+      args: { creates: "{{ oracle_base }}/admin/CDB1/adump" }
+
+    # ================== 7. TWOJA PERSONALIZACJA ==================
+    - name: Konfiguracja .tmux.conf
+      copy:
+        dest: "/home/{{ item }}/.tmux.conf"
+        owner: "{{ item }}"
+        group: "{{ 'oinstall' if item == 'oracle' else item }}"
+        mode: '0644'
+        content: |
+          set -g mouse on
+          set -g mode-keys vi
+          bind h split-window -h -c "#{pane_current_path}"
+          bind v split-window -v -c "#{pane_current_path}"
+      loop: [ec2-user, oracle]
+
+    - name: Zmienne środowiskowe, aliasy i tryb vi w bashrc
+      blockinfile:
+        path: "/home/{{ item }}/.bashrc"
+        marker: "# {mark} ANSIBLE MANAGED USER CONFIG"
+        content: |
+          set -o vi
+          alias ll='ls -lah'
+          alias l='ll'
+          {% if item == 'oracle' %}
+          export ORACLE_BASE={{ oracle_base }}
+          export GRID_HOME={{ grid_home }}
+          export DB_HOME={{ db_home }}
           export ORACLE_HOME=$DB_HOME
           export ORACLE_SID=CDB1
           export PATH=$ORACLE_HOME/bin:$PATH
-          export CV_ASSUME_DISTID=OEL7.6
-          
-          # Aliasy do szybkiego przełączania kontekstu
           alias gridenv='export ORACLE_HOME=$GRID_HOME; export ORACLE_SID=+ASM; export PATH=$ORACLE_HOME/bin:$PATH'
           alias dbenv='export ORACLE_HOME=$DB_HOME; export ORACLE_SID=CDB1; export PATH=$ORACLE_HOME/bin:$PATH'
+          {% endif %}
+      loop: [ec2-user, oracle]
