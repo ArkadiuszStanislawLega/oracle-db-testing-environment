@@ -1,0 +1,145 @@
+---
+- name: Przygotowanie OS, LVM i dysków RAW dla Oracle ASM
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    # LVM tylko dla binariów i logów (dyski 50GB i 10GB)
+    lvm_volumes:
+      - { device: "/dev/nvme1n1", vg: "u01vg", lv: "u01lv", mount: "/u01" }
+      - { device: "/dev/nvme2n1", vg: "u02vg", lv: "u02lv", mount: "/u02" }
+    
+    # Dyski pod ASM (Zostają surowe - konfigurujemy tylko UDEV)
+    # nvme3 do nvme6 to +DATA (4x10GB), nvme7 i nvme8 to +RECOVERY (2x5GB)
+    asm_disks:
+      - "nvme3n1"
+      - "nvme4n1"
+      - "nvme5n1"
+      - "nvme6n1"
+      - "nvme7n1"
+      - "nvme8n1"
+
+  pre_tasks:
+    - name: Bootstrap - Instalacja Python 3.9 via RAW SSH
+      raw: dnf install -y python39
+
+    - name: Przełączenie interpretera Ansible na Pythona 3.9
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.9
+
+    - name: Ręczne zebranie faktów
+      setup:
+
+  tasks:
+    - name: Instalacja niezbędnych pakietów (Oracle Preinstall i LVM)
+      dnf:
+        name:
+          - oracle-database-preinstall-19c
+          - lvm2
+          - kmod
+          - libnsl
+          - net-tools
+          - psmisc
+          - vim
+          - tmux
+          - wget
+          - unzip
+          - rlwrap
+        state: present
+
+    # --- Konfiguracja Grup i Użytkowników dla Grid Infrastructure ---
+    - name: Dodanie grup administracyjnych dla ASM
+      group:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - asmadmin
+        - asmdba
+        - asmoper
+
+    - name: Dodanie użytkownika oracle (stworzonego przez preinstall) do grup ASM
+      user:
+        name: oracle
+        groups: asmadmin,asmdba,asmoper
+        append: yes
+
+    # --- Konfiguracja LVM (TYLKO u01 i u02) ---
+    - name: Utworzenie katalogów punktów montowania dla LVM
+      file:
+        path: "{{ item.mount }}"
+        state: directory
+        mode: '0755'
+      loop: "{{ lvm_volumes }}"
+
+    - name: Utworzenie grup wolumenów (VG) na wybranych dyskach NVMe
+      lvg:
+        vg: "{{ item.vg }}"
+        pvs: "{{ item.device }}"
+      loop: "{{ lvm_volumes }}"
+
+    - name: Utworzenie wolumenów logicznych (LV) zajmujących 100% VG
+      lvol:
+        vg: "{{ item.vg }}"
+        lv: "{{ item.lv }}"
+        size: 100%FREE
+      loop: "{{ lvm_volumes }}"
+
+    - name: Formatowanie wolumenów LVM jako XFS
+      filesystem:
+        fstype: xfs
+        dev: "/dev/{{ item.vg }}/{{ item.lv }}"
+      loop: "{{ lvm_volumes }}"
+
+    - name: Montowanie dysków i dodanie wpisów do /etc/fstab
+      mount:
+        path: "{{ item.mount }}"
+        src: "/dev/{{ item.vg }}/{{ item.lv }}"
+        fstype: xfs
+        opts: defaults
+        state: mounted
+      loop: "{{ lvm_volumes }}"
+
+    - name: Zmiana właściciela punktów montowania LVM dla Oracle
+      file:
+        path: "{{ item.mount }}"
+        owner: oracle
+        group: oinstall
+        state: directory
+        recurse: yes
+      loop: "{{ lvm_volumes }}"
+
+    # --- Konfiguracja UDEV dla surowych dysków ASM ---
+    - name: Utworzenie reguł udev dla dysków pod ASM
+      copy:
+        dest: /etc/udev/rules.d/99-oracle-asmdevices.rules
+        content: |
+          # Reguły nadające uprawnienia do surowych dysków dla demona ASM
+          {% for disk in asm_disks %}
+          KERNEL=="{{ disk }}", OWNER="oracle", GROUP="asmadmin", MODE="0660"
+          {% endfor %}
+        mode: '0644'
+
+    - name: Przeładowanie reguł udev (aplikacja uprawnień bez restartu)
+      shell: udevadm control --reload-rules && udevadm trigger
+      changed_when: true
+
+    # --- Zmienne Środowiskowe dla ułatwienia pracy z ASM/CDB ---
+    - name: Wygenerowanie .bash_profile dla usera oracle (wsparcie dla ASM i CDB)
+      blockinfile:
+        path: /home/oracle/.bash_profile
+        create: yes
+        owner: oracle
+        group: oinstall
+        marker: "# {mark} ORACLE ENV"
+        content: |
+          export ORACLE_BASE=/u01/app/oracle
+          export GRID_HOME=/u01/app/19.3.0/grid
+          export DB_HOME=/u01/app/oracle/product/19.3.0/dbhome_1
+          export ORACLE_HOME=$DB_HOME
+          export ORACLE_SID=CDB1
+          export PATH=$ORACLE_HOME/bin:$PATH
+          export CV_ASSUME_DISTID=OEL7.6
+          
+          # Aliasy do szybkiego przełączania kontekstu
+          alias gridenv='export ORACLE_HOME=$GRID_HOME; export ORACLE_SID=+ASM; export PATH=$ORACLE_HOME/bin:$PATH'
+          alias dbenv='export ORACLE_HOME=$DB_HOME; export ORACLE_SID=CDB1; export PATH=$ORACLE_HOME/bin:$PATH'
