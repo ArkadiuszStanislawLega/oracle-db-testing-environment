@@ -88,9 +88,7 @@
             content: |
               set -o vi
               alias ll='ls -lah'
-              alias l='ll'
-              alias dbenv='export ORACLE_BASE={{ dir_oracle_base }}; export ORACLE_HOME={{ dir_db_home }}; export ORACLE_SID={{ name_cdb }}; export PATH=$ORACLE_HOME/bin:$PATH'
-              dbenv
+
         - blockinfile:
             path: /home/oracle/.bash_profile
             create: yes
@@ -98,6 +96,10 @@
             group: oinstall
             content: |
               if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
+              export ORACLE_BASE={{ dir_oracle_base }}
+              export ORACLE_HOME={{ dir_db_home }}
+              export ORACLE_SID={{ name_cdb }}
+              export PATH=$ORACLE_HOME/bin:$PATH
 
     # ================== 2. DYNAMICZNE MAPOWANIE DYSKÓW I LVM ==================
     - name: Zbieranie informacji o dyskach NVMe
@@ -156,6 +158,8 @@
         - "{{ dir_pdb1 }}/oradata"
         - "{{ dir_pdb2 }}/oradata"
         - "{{ dir_pdb3 }}/oradata"
+        - "{{ dir_db_mirr }}/oradata"
+        - "{{ dir_db_mirr }}/archivelog"
 
     - name: Pobranie systemowych ID
       command: id -{{ item }} oracle
@@ -167,10 +171,10 @@
       block:
         - modprobe: name=fuse state=present
         - file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775'
-          loop: ["{{ s3_golden_mount }}", "{{ dir_db_backup }}"]
+          loop: ["{{ dir_s3_golden_mount }}", "{{ dir_db_backup }}"]
         - file: src=/usr/bin/s3fs dest=/sbin/mount.s3fs state=link
         - mount: path="{{ dir_db_backup }}" src="{{ s3_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
-        - mount: path="{{ s3_golden_mount }}" src="{{ s3_golden_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
+        - mount: path="{{ dir_s3_golden_mount }}" src="{{ s3_golden_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
 
     # ================== 3. INSTALACJA RDBMS (SE2) ==================
     - name: Utworzenie struktury pod DB Home
@@ -184,7 +188,7 @@
 
     - name: Rozpakowanie binarek bazy danych
       unarchive:
-        src: "{{ s3_golden_mount }}/LINUX.X64_193000_db_home.zip"
+        src: "{{ dir_s3_golden_mount }}/LINUX.X64_193000_db_home.zip"
         dest: "{{ dir_db_home }}"
         remote_src: yes
         owner: oracle
@@ -267,13 +271,39 @@
         export ORACLE_HOME={{ dir_db_home }}
         export ORACLE_SID={{ name_cdb }}
         export PATH=$ORACLE_HOME/bin:$PATH
-        mkdir -p {{ dir_db_logs }}/{{ name_cdb }}/rman_backups {{ dir_db_logs }}/{{ name_cdb }}/autobackup
+        mkdir -p {{ dir_db_backup }}/{{ name_cdb }}/rman_backups {{ dir_db_backup }}/{{ name_cdb }}/autobackup
         rman target / <<EOF
         CONFIGURE DEFAULT DEVICE TYPE TO DISK;
-        CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '{{ dir_db_logs }}/{{ name_cdb }}/rman_backups/bkp_%U';
+        CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '{{ dir_db_backup }}/{{ name_cdb }}/rman_backups/bkp_%U';
         CONFIGURE CONTROLFILE AUTOBACKUP ON;
-        CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ dir_db_logs }}/{{ name_cdb }}/autobackup/ctl_%F';
+        CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ dir_db_backup }}/{{ name_cdb }}/autobackup/ctl_%F';
         CONFIGURE DEVICE TYPE DISK BACKUP TYPE TO COMPRESSED BACKUPSET;
+        EXIT;
+        EOF
+      args:
+        executable: /bin/bash
+
+    - name: Konfiguracja mirroringu plików kontrolnych i logów redo 
+      become_user: oracle
+      shell: |
+        export ORACLE_HOME={{ dir_db_home }}
+        export ORACLE_SID={{ name_cdb }}
+        export PATH=$ORACLE_HOME/bin:$PATH
+        
+        mkdir -p {{ dir_db_mirr }}/oradata/{{ name_cdb }}
+        
+        sqlplus -s / as sysdba <<EOF
+        ALTER SYSTEM SET control_files='{{ dir_db_logs }}/oradata/{{ name_cdb }}/control01.ctl', '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/control02.ctl' SCOPE=SPFILE;
+        ALTER SYSTEM SET audit_file_dest='{{ dir_db_logs }}/app/oracle/audit' SCOPE=SPFILE;
+        
+        SHUTDOWN IMMEDIATE;
+        !cp {{ dir_db_logs }}/oradata/{{ name_cdb }}/control01.ctl {{ dir_db_mirr }}/oradata/{{ name_cdb }}/control02.ctl
+        STARTUP;
+        
+        ALTER DATABASE ADD LOGFILE MEMBER '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/redo01_mirror.log' TO GROUP 1;
+        ALTER DATABASE ADD LOGFILE MEMBER '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/redo02_mirror.log' TO GROUP 2;
+        ALTER DATABASE ADD LOGFILE MEMBER '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/redo03_mirror.log' TO GROUP 3;
+        
         EXIT;
         EOF
       args:
