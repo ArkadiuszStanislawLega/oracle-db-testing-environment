@@ -115,32 +115,39 @@ resource "aws_ebs_volume" "u01_binaries" {
   tags = { Name = "Oracle-u01-Binaries" }
 }
 
-resource "aws_ebs_volume" "u02_pdb1" {
+resource "aws_ebs_volume" "u02_logs" {
   availability_zone = aws_instance.oracle_db.availability_zone
   size              = 10
   type              = "gp3"
-  tags = { Name = "Oracle-u02-pdb1" }
+  tags = { Name = "Oracle-u02-logs" }
 }
 
-resource "aws_ebs_volume" "u03_pdb2" {
+resource "aws_ebs_volume" "u03_mirr" {
   availability_zone = aws_instance.oracle_db.availability_zone
   size              = 10
   type              = "gp3"
-  tags = { Name = "Oracle-u03-pdb1" }
+  tags = { Name = "Oracle-u03-mirr" }
 }
 
-resource "aws_ebs_volume" "u04_pdb3" {
+resource "aws_ebs_volume" "u05_pdb1" {
   availability_zone = aws_instance.oracle_db.availability_zone
   size              = 10
   type              = "gp3"
-  tags = { Name = "Oracle-u04-pdb3" }
+  tags = { Name = "Oracle-u05-pdb1" }
 }
 
-resource "aws_ebs_volume" "u05_fra" {
+resource "aws_ebs_volume" "u06_pdb2" {
   availability_zone = aws_instance.oracle_db.availability_zone
   size              = 10
   type              = "gp3"
-  tags = { Name = "Oracle-u05-FRA" }
+  tags = { Name = "Oracle-u06-pdb2" }
+}
+
+resource "aws_ebs_volume" "u07_pdb3" {
+  availability_zone = aws_instance.oracle_db.availability_zone
+  size              = 10
+  type              = "gp3"
+  tags = { Name = "Oracle-u07-pdb3" }
 }
 
 resource "aws_volume_attachment" "attach_u01" {
@@ -151,25 +158,31 @@ resource "aws_volume_attachment" "attach_u01" {
 
 resource "aws_volume_attachment" "attach_u02" {
   device_name = "/dev/sdc"
-  volume_id   = aws_ebs_volume.u02_pdb1.id
+  volume_id   = aws_ebs_volume.u02_logs.id
   instance_id = aws_instance.oracle_db.id
 }
 
 resource "aws_volume_attachment" "attach_u03" {
   device_name = "/dev/sdd"
-  volume_id   = aws_ebs_volume.u03_pdb2.id
+  volume_id   = aws_ebs_volume.u03_mirr.id
   instance_id = aws_instance.oracle_db.id
 }
 
 resource "aws_volume_attachment" "attach_u04" {
   device_name = "/dev/sde"
-  volume_id   = aws_ebs_volume.u04_pdb3.id
+  volume_id   = aws_ebs_volume.u05_pdb1.id
   instance_id = aws_instance.oracle_db.id
 }
 
 resource "aws_volume_attachment" "attach_u05" {
   device_name = "/dev/sdf"
-  volume_id   = aws_ebs_volume.u05_fra.id
+  volume_id   = aws_ebs_volume.u06_pdb2.id
+  instance_id = aws_instance.oracle_db.id
+}
+
+resource "aws_volume_attachment" "attach_u06" {
+  device_name = "/dev/sdg"
+  volume_id   = aws_ebs_volume.u07_pdb3.id
   instance_id = aws_instance.oracle_db.id
 }
 
