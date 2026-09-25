@@ -6,16 +6,22 @@
   vars:
     s3_golden: "oracle-golden-images-terraform"
     s3_backup: "oracle-test-backups-terraform-asm"
+
     mount_golden: "/golden_images"
-    mount_backup: "/backup"
+    mount_backup: "/u03"
     
     grid_zip_src: "/golden_images/LINUX.X64_193000_grid_home.zip"
     db_zip_src: "/golden_images/LINUX.X64_193000_db_home.zip"
     
-    oracle_base: "/u01/app/oracle"
-    ora_inventory: "/u01/app/oraInventory"
-    grid_home: "/u01/app/oracle/product/19.3.0/grid"
-    db_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
+    dir_oracle_base: "/u01/app/oracle"
+    dir_ora_inventory: "/u01/app/oraInventory"
+    dir_grid_home: "/u01/app/oracle/product/19.3.0/grid"
+    dir_db_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
+
+    name_cdb: "TESTCDB"
+    name_pdb1: "TESTPDB1"
+
+    passwords: "aoeuiAOEUI9"
 
   pre_tasks:
     - name: Bootstrap - Instalacja Python 3.9
@@ -48,8 +54,8 @@
     - name: Przydzielenie list urządzeń
       set_fact:
         lvm_volumes:
-          - { device: "/dev/{{ d_50g.stdout }}", vg: "u01vg", lv: "u01vg", mount: "/u01" }
-          - { device: "/dev/{{ d_10g.stdout_lines[0] }}", vg: "u02vg", lv: "u02lv", mount: "/u02" }
+          - { device: "/dev/{{ d_50g.stdout }}", vg: "u01vg", lv: "binlv", mount: "/u01" }
+          - { device: "/dev/{{ d_10g.stdout_lines[0] }}", vg: "u02vg", lv: "loglv", mount: "/u02" }
         asm_all_raw: "{{ d_10g.stdout_lines[1:] + d_5g.stdout_lines }}"
         asm_data_list: "{{ d_10g.stdout_lines[1:] | map('regex_replace', '^(.*)$', '/dev/\\1') | join(',') }}"
         asm_rec_list: "{{ d_5g.stdout_lines | map('regex_replace', '^(.*)$', '/dev/\\1') | join(',') }}"
@@ -134,13 +140,13 @@
     # ================== 5. GRID INFRASTRUCTURE ==================
     - name: Tworzenie katalogów Grid i Inventory
       file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775' recurse=yes
-      loop: ["{{ grid_home }}", "{{ ora_inventory }}"]
+      loop: ["{{ dir_grid_home }}", "{{ dir_ora_inventory }}"]
 
     - name: Rozpakowanie binariów Grid
-      unarchive: src="{{ grid_zip_src }}" dest="{{ grid_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ grid_home }}/gridSetup.sh"
+      unarchive: src="{{ grid_zip_src }}" dest="{{ dir_grid_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ dir_grid_home }}/gridSetup.sh"
 
     - name: Instalacja pakietu cvuqdisk
-      dnf: name="{{ grid_home }}/cv/rpm/cvuqdisk-1.0.10-1.rpm" state=present disable_gpg_check=yes
+      dnf: name="{{ dir_grid_home }}/cv/rpm/cvuqdisk-1.0.10-1.rpm" state=present disable_gpg_check=yes
       environment: { CVUQDISK_GRP: "oinstall" }
 
     - name: Generowanie odpowiedzi Grid Setup
@@ -152,7 +158,7 @@
           oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
           oracle.install.option=HA_CONFIG
           ORACLE_BASE={{ oracle_base }}
-          INVENTORY_LOCATION={{ ora_inventory }}
+          INVENTORY_LOCATION={{ dir_ora_inventory }}
           oracle.install.asm.OSDBA=asmdba
           oracle.install.asm.OSOPER=asmoper
           oracle.install.asm.OSASM=asmadmin
@@ -162,19 +168,19 @@
           oracle.install.asm.diskGroup.diskDiscoveryString=/dev/nvme*
           oracle.install.asm.diskGroup.disks={{ asm_data_list }}
           oracle.install.asm.configureGIMRDataDG=false
-          oracle.install.asm.monitorPassword=SysPassword123!
-          oracle.install.asm.SYSASMPassword=SysPassword123!
+          oracle.install.asm.monitorPassword={{ passwords }}
+          oracle.install.asm.SYSASMPassword={{ passwords }}
 
     - name: Uruchomienie Grid Setup (+DATA)
       become_user: oracle
-      command: "{{ grid_home }}/gridSetup.sh -silent -waitforcompletion -responseFile /home/oracle/grid_install.rsp -ignorePrereqFailure"
+      command: "{{ dir_grid_home }}/gridSetup.sh -silent -waitforcompletion -responseFile /home/oracle/grid_install.rsp -ignorePrereqFailure"
       environment: { CV_ASSUME_DISTID: "OEL7.6" }
       register: grid_setup_output
       failed_when: grid_setup_output.rc not in [0, 6]
-      args: { creates: "{{ ora_inventory }}/orainstRoot.sh" }
+      args: { creates: "{{ dir_ora_inventory }}/orainstRoot.sh" }
 
     - name: Wykonanie skryptu orainstRoot.sh
-      command: "{{ ora_inventory }}/orainstRoot.sh"
+      command: "{{ dir_ora_inventory }}/orainstRoot.sh"
       args: { creates: "/etc/oraInst.loc" }
 
     - name: Wstrzyknięcie zmiennej do systemd (FIX ohasd timeout OEL8)
@@ -192,34 +198,34 @@
       failed_when: false
 
     - name: Wykonanie skryptu root.sh dla Grida
-      command: "{{ grid_home }}/root.sh"
+      command: "{{ dir_grid_home }}/root.sh"
       environment: { CV_ASSUME_DISTID: "OEL7.6" }
       args: { creates: "/etc/oracle/olr.loc" }
 
     - name: Konfiguracja asystentów Grida (utworzenie instancji ASM, Listenera i grupy +DATA)
       become_user: oracle
-      command: "{{ grid_home }}/gridSetup.sh -executeConfigTools -silent -responseFile /home/oracle/grid_install.rsp"
+      command: "{{ dir_grid_home }}/gridSetup.sh -executeConfigTools -silent -responseFile /home/oracle/grid_install.rsp"
       environment: { CV_ASSUME_DISTID: "OEL7.6" }
       register: grid_config_tools
       failed_when: grid_config_tools.rc not in [0, 6]
       args:
-        creates: "{{ grid_home }}/network/admin/listener.ora"
+        creates: "{{ dir_grid_home }}/network/admin/listener.ora"
 
     - name: Utworzenie grupy dyskowej +RECOVERY w ASM
       become_user: oracle
-      command: "{{ grid_home }}/bin/asmca -silent -createDiskGroup -diskGroupName RECOVERY -diskList {{ asm_rec_list }} -redundancy EXTERNAL"
+      command: "{{ dir_grid_home }}/bin/asmca -silent -createDiskGroup -diskGroupName RECOVERY -diskList {{ asm_rec_list }} -redundancy EXTERNAL"
       environment:
-        ORACLE_HOME: "{{ grid_home }}"
+        ORACLE_HOME: "{{ dir_grid_home }}"
         ORACLE_SID: "+ASM"
       register: asmca_output
       failed_when: "asmca_output.rc != 0 and 'already exists' not in asmca_output.stdout"
 
     # ================== 6. SILNIK RDBMS I CDB ==================
     - name: Utworzenie katalogu DB_HOME
-      file: path="{{ db_home }}" state=directory owner=oracle group=oinstall mode='0775' recurse=yes
+      file: path="{{ dir_db_home }}" state=directory owner=oracle group=oinstall mode='0775' recurse=yes
 
     - name: Rozpakowanie binariów RDBMS
-      unarchive: src="{{ db_zip_src }}" dest="{{ db_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ db_home }}/runInstaller"
+      unarchive: src="{{ db_zip_src }}" dest="{{ dir_db_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ dir_db_home }}/runInstaller"
 
     - name: Generowanie odpowiedzi dla DB Setup
       copy:
@@ -230,9 +236,9 @@
           oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
           oracle.install.option=INSTALL_DB_SWONLY
           UNIX_GROUP_NAME=oinstall
-          INVENTORY_LOCATION=/u01/app/oraInventory
+          INVENTORY_LOCATION={{ dir_ora_inventory }}
           ORACLE_BASE={{ oracle_base }}
-          ORACLE_HOME={{ db_home }}
+          ORACLE_HOME={{ dir_db_home }}
           oracle.install.db.InstallEdition=SE2
           oracle.install.db.OSDBA_GROUP=dba
           oracle.install.db.OSOPER_GROUP=oper
@@ -244,39 +250,39 @@
     - name: Cicha instalacja RDBMS (Software Only)
       become_user: oracle
       shell: |
-        {{ db_home }}/runInstaller -silent -waitforcompletion -responseFile /home/oracle/db_install.rsp -ignorePrereqFailure
+        {{ dir_db_home }}/runInstaller -silent -waitforcompletion -responseFile /home/oracle/db_install.rsp -ignorePrereqFailure
         RC=$?
         if [ $RC -eq 0 ] || [ $RC -eq 6 ]; then
-          touch {{ db_home }}/.ansible_db_installed
+          touch {{ dir_db_home }}/.ansible_db_installed
           exit 0
         else
           exit $RC
         fi
       environment: { CV_ASSUME_DISTID: "OEL7.6" }
       args:
-        creates: "{{ db_home }}/.ansible_db_installed"
+        creates: "{{ dir_db_home }}/.ansible_db_installed"
         executable: /bin/bash
 
     - name: Wykonanie skryptu root.sh dla bazy danych
-      command: "{{ db_home }}/root.sh"
+      command: "{{ dir_db_home }}/root.sh"
       changed_when: true
 
     - name: Tworzenie instancji Container Database (CDB1)
       become_user: oracle
       command: >
-        {{ db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc
-        -gdbname CDB1 -sid CDB1 -responseFile NO_VALUE -characterSet AL32UTF8
-        -sysPassword SysPassword123! -systemPassword SysPassword123!
-        -createAsContainerDatabase true -numberOfPDBs 1 -pdbName PDB1
-        -pdbAdminPassword SysPassword123! -databaseType MULTIPURPOSE
+        {{ dir_db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc
+        -gdbname {{ name_cdb }} -sid {{ name_cdb }} -responseFile NO_VALUE -characterSet AL32UTF8
+        -sysPassword {{ passwords }} -systemPassword {{ passwords }}
+        -createAsContainerDatabase true -numberOfPDBs 1 -pdbName {{ name_pdb1 }}
+        -pdbAdminPassword {{ passwords }} -databaseType MULTIPURPOSE
         -automaticMemoryManagement false -totalMemory 4096
         -storageType ASM -diskGroupName +DATA -recoveryGroupName +RECOVERY
-        -recoveryAreaSize 8912 -asmsnmpPassword SysPassword123!
+        -recoveryAreaSize 8912 -asmsnmpPassword {{ passwords }}
       environment:
-        ORACLE_HOME: "{{ db_home }}"
-        ORACLE_SID: "CDB1"
-        PATH: "{{ db_home }}/bin:/usr/local/bin:/bin:/usr/bin"
-      args: { creates: "{{ oracle_base }}/admin/CDB1/adump" }
+        ORACLE_HOME: "{{ dir_db_home }}"
+        ORACLE_SID: "{{ name_cdb }}"
+        PATH: "{{ dir_db_home }}/bin:/usr/local/bin:/bin:/usr/bin"
+      args: { creates: "{{ oracle_base }}/admin/{{ name_cdb }}/adump" }
 
     # ================== 7. TWOJA PERSONALIZACJA ==================
     - name: Konfiguracja .tmux.conf
@@ -302,12 +308,12 @@
           alias l='ll'
           {% if item == 'oracle' %}
           export ORACLE_BASE={{ oracle_base }}
-          export GRID_HOME={{ grid_home }}
-          export DB_HOME={{ db_home }}
+          export GRID_HOME={{ dir_grid_home }}
+          export DB_HOME={{ dir_db_home }}
           export ORACLE_HOME=$DB_HOME
-          export ORACLE_SID=CDB1
+          export ORACLE_SID={{ name_cdb }} 
           export PATH=$ORACLE_HOME/bin:$PATH
           alias gridenv='export ORACLE_HOME=$GRID_HOME; export ORACLE_SID=+ASM; export PATH=$ORACLE_HOME/bin:$PATH'
-          alias dbenv='export ORACLE_HOME=$DB_HOME; export ORACLE_SID=CDB1; export PATH=$ORACLE_HOME/bin:$PATH'
+          alias dbenv='export ORACLE_HOME=$DB_HOME; export ORACLE_SID={{ name_cdb }}; export PATH=$ORACLE_HOME/bin:$PATH'
           {% endif %}
       loop: [ec2-user, oracle]
