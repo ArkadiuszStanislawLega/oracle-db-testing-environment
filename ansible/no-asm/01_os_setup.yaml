@@ -21,11 +21,12 @@
     dir_bin: "/u01"
     dir_u02_base: "/u02/app/oracle"
     dir_db_logs: "/u02"
+    dir_cdb: "{{ dir_db_logs }}/oradata"
     dir_db_mirr: "/u03"
     dir_db_backup: "/u04"
-    dir_pdb1: "/u05"
-    dir_pdb2: "/u06"
-    dir_pdb3: "/u07"
+    dir_pdb1: "/u05/oradata"
+    dir_pdb2: "/u06/oradata"
+    dir_pdb3: "/u07/oradata"
     dir_s3_golden_mount: "/golden_image"
 
     s3_bucket: "oracle-test-backups-terraform"
@@ -72,34 +73,37 @@
     - name: Konfiguracja tmux i bash dla oracle
       block:
         - copy:
-            dest: /home/oracle/.tmux.conf
-            owner: oracle
-            group: oinstall
-            content: |
-              set -g mouse on
-              set -g mode-keys vi
-              bind h split-window -h -c "#{pane_current_path}"
-              bind v split-window -v -c "#{pane_current_path}"
+          path: "/home/{{ item }}/.bashrc"
+          owner: oracle
+          group: oinstall
+          content: |
+            set -g mouse on
+            set -g mode-keys vi
+            bind h split-window -h -c "#{pane_current_path}"
+            bind v split-window -v -c "#{pane_current_path}"
+          loop: [ec2-user, oracle]
         - blockinfile:
-            path: /home/oracle/.bashrc
-            create: yes
-            owner: oracle
-            group: oinstall
-            content: |
-              set -o vi
-              alias ll='ls -lah'
-
+          path: "/home/{{ item }}/.bashrc"
+          create: yes
+          owner: oracle
+          group: oinstall
+          content: |
+            set -o vi
+          loop: [ec2-user, oracle]
         - blockinfile:
-            path: /home/oracle/.bash_profile
-            create: yes
-            owner: oracle
-            group: oinstall
-            content: |
-              if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
-              export ORACLE_BASE={{ dir_oracle_base }}
-              export ORACLE_HOME={{ dir_db_home }}
-              export ORACLE_SID={{ name_cdb }}
-              export PATH=$ORACLE_HOME/bin:$PATH
+          path: "/home/{{ item }}/.bash_profile"
+          create: yes
+          owner: oracle
+          group: oinstall
+          content: |
+            if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
+            export DB_HOME={{ dir_db_home }}
+            export ORACLE_BASE={{ dir_oracle_base }}
+            export ORACLE_HOME=$DB_HOME
+            export ORACLE_SID={{ name_cdb }} 
+            export PATH=$ORACLE_HOME/bin:$PATH
+            alias dbenv='export ORACLE_SID={{ name_cdb }};'
+            alias ll='ls -lah'
 
     # ================== 2. DYNAMICZNE MAPOWANIE DYSKÓW I LVM ==================
     - name: Zbieranie informacji o dyskach NVMe
@@ -120,7 +124,7 @@
     - name: Zdefiniowanie dynamicznej listy wolumenów LVM
       set_fact:
         lvm_volumes:
-          - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "/u01" }
+          - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
           - { device: "{{ disks_10g.stdout_lines[0] }}", vg: "u02vg", lv: "loglv", mount: "{{ dir_db_logs }}" }
           - { device: "{{ disks_10g.stdout_lines[1] }}", vg: "u03vg", lv: "mirrlv", mount: "{{ dir_db_mirr }}" }
           - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u04vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
@@ -155,9 +159,9 @@
         - "{{ dir_db_logs }}/backup_logs"
         - "{{ dir_u02_base }}/diag"
         - "{{ dir_u02_base }}/audit"
-        - "{{ dir_pdb1 }}/oradata"
-        - "{{ dir_pdb2 }}/oradata"
-        - "{{ dir_pdb3 }}/oradata"
+        - "{{ dir_pdb1 }}"
+        - "{{ dir_pdb2 }}"
+        - "{{ dir_pdb3 }}"
         - "{{ dir_db_mirr }}/oradata"
         - "{{ dir_db_mirr }}/archivelog"
 
@@ -233,31 +237,24 @@
       shell: |
         {{ dir_db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc \
         -gdbname {{ name_cdb }} -sid {{ name_cdb }} -responseFile NO_VALUE -characterSet AL32UTF8 \
-        -sysPassword "{{ passwords }}" -systemPassword "{{ passwords}}" \
+        -sysPassword "{{ passwords }}" -systemPassword "{{ passwords }}" \
         -createAsContainerDatabase true -numberOfPDBs 0 \
         -databaseType MULTIPURPOSE -automaticMemoryManagement false -totalMemory 4096 \
         -storageType FS -datafileDestination {{ dir_db_logs }}/oradata \
         -recoveryAreaDestination {{ dir_db_logs }}/fast_recovery_area -recoveryAreaSize 4096
-      environment:
-        ORACLE_HOME: "{{ dir_db_home }}"
-        ORACLE_SID: "{{ name_cdb }}"
       args:
         creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump"
 
     - name: Utworzenie 3 instancji PDB
       become_user: oracle
       shell: |
-        source ~/.bashrc
-        export ORACLE_HOME={{ dir_db_home }}
-        export ORACLE_SID={{ name_cdb }}
-        export PATH=$ORACLE_HOME/bin:$PATH
         sqlplus -s / as sysdba <<EOF
         CREATE PLUGGABLE DATABASE {{ name_pdb1 }} ADMIN USER pdbadmin IDENTIFIED BY "{{ passwords }}"
-          FILE_NAME_CONVERT=('{{ dir_db_logs }}/oradata/{{ name_cdb }}/pdbseed/', '{{ dir_pdb1 }}/oradata/{{ name_cdb }}/{{ name_pdb1 }}/');
+          FILE_NAME_CONVERT=('{{ dir_cdb }}/{{ name_cdb }}/pdbseed/', '{{ dir_pdb1 }}/{{ name_cdb }}/{{ name_pdb1 }}/');
         CREATE PLUGGABLE DATABASE {{ name_pdb2 }} ADMIN USER pdbadmin IDENTIFIED BY "{{ passwords }}"
-          FILE_NAME_CONVERT=('{{ dir_db_logs }}/oradata/{{ name_cdb }}/pdbseed/', '{{ dir_pdb2 }}/oradata/{{ name_cdb }}/{{ name_pdb2 }}/');
+          FILE_NAME_CONVERT=('{{ dir_cdb }}/{{ name_cdb }}/pdbseed/', '{{ dir_pdb2 }}/{{ name_cdb }}/{{ name_pdb2 }}/');
         CREATE PLUGGABLE DATABASE {{ name_pdb3 }} ADMIN USER pdbadmin IDENTIFIED BY "{{ passwords }}"
-          FILE_NAME_CONVERT=('{{ dir_db_logs }}/oradata/{{ name_cdb }}/pdbseed/', '{{ dir_pdb3 }}/oradata/{{ name_cdb }}/{{ name_pdb3 }}/');
+          FILE_NAME_CONVERT=('{{ dir_cdb }}/{{ name_cdb }}/pdbseed/', '{{ dir_pdb3 }}/{{ name_cdb }}/{{ name_pdb3 }}/');
         ALTER PLUGGABLE DATABASE ALL OPEN;
         ALTER PLUGGABLE DATABASE ALL SAVE STATE;
         EXIT;
@@ -268,9 +265,6 @@
     - name: Konfiguracja domyślnych parametrów RMAN
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ dir_db_home }}
-        export ORACLE_SID={{ name_cdb }}
-        export PATH=$ORACLE_HOME/bin:$PATH
         mkdir -p {{ dir_db_backup }}/{{ name_cdb }}/rman_backups {{ dir_db_backup }}/{{ name_cdb }}/autobackup
         rman target / <<EOF
         CONFIGURE DEFAULT DEVICE TYPE TO DISK;
@@ -286,10 +280,6 @@
     - name: Konfiguracja mirroringu plików kontrolnych i logów redo 
       become_user: oracle
       shell: |
-        export ORACLE_HOME={{ dir_db_home }}
-        export ORACLE_SID={{ name_cdb }}
-        export PATH=$ORACLE_HOME/bin:$PATH
-        
         mkdir -p {{ dir_db_mirr }}/oradata/{{ name_cdb }}
         
         sqlplus -s / as sysdba <<EOF
