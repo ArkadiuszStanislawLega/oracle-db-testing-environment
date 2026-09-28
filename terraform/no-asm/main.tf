@@ -10,13 +10,12 @@ terraform {
 provider "aws" {
   region = "eu-central-1"
 }
-#Ulotny koszyk na testowe backupy (znika przy destroy)
+
 resource "aws_s3_bucket" "oracle_test_backups" {
   bucket        = "oracle-test-backups-terraform" 
   force_destroy = true
 }
 
-# ================= IAM =================
 resource "aws_iam_role" "ec2_s3_role" {
   name = "oracle_ec2_s3_role"
   assume_role_policy = jsonencode({
@@ -59,13 +58,11 @@ resource "aws_iam_instance_profile" "ec2_s3_profile" {
   name = "oracle_ec2_s3_profile"
   role = aws_iam_role.ec2_s3_role.name
 }
-# =======================================
 
 resource "aws_security_group" "oracle_ssh_sg" {
   name        = "oracle_ssh_sg"
   description = "Zezwol na ruch SSH i Oracle z zewnatrz"
 
-  # Reguła dla SSH
   ingress {
     description = "SSH"
     from_port   = 22
@@ -74,13 +71,12 @@ resource "aws_security_group" "oracle_ssh_sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  # NOWA reguła dla SQL Developera / Oracle Net Listener
   ingress {
     description = "Oracle SQL Developer"
     from_port   = 1521
     to_port     = 1521
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"] # Podmień na swoje IP dla większego bezpieczeństwa
+    cidr_blocks = ["0.0.0.0/0"] 
   }
 
   egress {

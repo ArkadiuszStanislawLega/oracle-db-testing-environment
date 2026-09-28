@@ -11,13 +11,11 @@ provider "aws" {
   region = "eu-central-1"
 }
 
-# Ulotny koszyk na testowe backupy
 resource "aws_s3_bucket" "oracle_test_backups" {
   bucket        = "oracle-test-backups-terraform-asm" 
   force_destroy = true
 }
 
-# ================= IAM =================
 resource "aws_iam_role" "ec2_s3_role_asm" {
   name = "oracle_ec2_s3_role_asm"
   assume_role_policy = jsonencode({
@@ -60,7 +58,6 @@ resource "aws_iam_instance_profile" "ec2_s3_profile_asm" {
   name = "oracle_ec2_s3_profile_asm"
   role = aws_iam_role.ec2_s3_role_asm.name
 }
-# =======================================
 
 resource "aws_security_group" "oracle_ssh_sg_asm" {
   name        = "oracle_ssh_sg_asm"
@@ -108,8 +105,6 @@ resource "aws_instance" "oracle_db" {
   }
 }
 
-# ================= DYSKI =================
-
 resource "aws_ebs_volume" "u01_binaries" {
   availability_zone = aws_instance.oracle_db.availability_zone
   size              = 50
@@ -125,7 +120,6 @@ resource "aws_volume_attachment" "attach_u01" {
   instance_id = aws_instance.oracle_db.id
 }
 
-# --- LVM: Logi i zrzuty zewnetrzne (10GB) ---
 resource "aws_ebs_volume" "u02_logs" {
   availability_zone = aws_instance.oracle_db.availability_zone
   size              = 10
