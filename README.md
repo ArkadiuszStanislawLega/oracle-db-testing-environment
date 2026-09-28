@@ -16,6 +16,12 @@ When the infrastructure is deleted, the backup bucket is removed, whereas the bu
 - configuring logs,
 - configuring RMAN.
 
+# Order of operations
+- terraform S3
+- terraform ASM or NO-ASM
+- Ansible ASM/01 or NO-ASM/01
+- connect and start testing via ssh to host, or sqldeveloper 
+
 # ASM 
 
 ## Structure 
