@@ -1,5 +1,5 @@
 ---
-- name: Zero to DB - Kompletny Provisioning Oracle 19c SE2 - no ASM
+- name: Zero to DB - Completed Provisioning Oracle 19c SE2 - no ASM
   hosts: all
   become: yes
   gather_facts: no
@@ -9,7 +9,7 @@
       raw: yum install -y python39
       changed_when: false
 
-    - name: Ręczne zebranie faktów systemowych
+    - name: Gathering facts
       setup:
 
   vars:
@@ -39,13 +39,12 @@
     name_pdb3: "TEST3PDB"
 
   tasks:
-    # ================== 1. PRZYGOTOWANIE OS & POWŁOKI ==================
-    - name: Włączenie repozytorium EPEL
+    - name: Adding EPEL repo
       yum:
         name: oracle-epel-release-el8
         state: present
 
-    - name: Instalacja pakietów systemowych
+    - name: Installing sys packages
       yum:
         name:
           - oracle-database-preinstall-19c
@@ -56,7 +55,7 @@
           - tmux
         state: present
 
-    - name: Wyłączenie SELinux
+    - name: Shutting down SELinux
       block:
         - lineinfile:
             path: /etc/selinux/config
@@ -65,7 +64,7 @@
         - shell: setenforce 0
           failed_when: false
 
-    - name: Zmiana hasła użytkownika oracle
+    - name: Update oracle password
       user:
         name: oracle
         password: "{{ 'aoeuiAOEUI9' | password_hash('sha512') }}"
@@ -117,22 +116,22 @@
               alias ll='ls -lah'
 
     # ================== 2. DYNAMICZNE MAPOWANIE DYSKÓW I LVM ==================
-    - name: Zbieranie informacji o dyskach NVMe
+    - name: Gathering info about NVMe
       shell: lsblk -d -n -o NAME,SIZE | grep nvme
       register: nvme_disks
       changed_when: false
 
-    - name: Pobranie największego dodatkowego dysku
+    - name: Get 30GB disk
       shell: lsblk -d -n -b -o NAME,SIZE | awk '$1 != "nvme0n1" && $2 > 20000000000 {print "/dev/"$1}' | head -n 1
       register: disk_30g
       changed_when: false
 
-    - name: Pobranie dysków mniejszych niż 15GB
+    - name: Get lower than 15GB disks
       shell: lsblk -d -n -b -o NAME,SIZE | awk '$1 != "nvme0n1" && $2 < 15000000000 {print "/dev/"$1}'
       register: disks_10g
       changed_when: false
 
-    - name: Zdefiniowanie dynamicznej listy wolumenów LVM
+    - name: Defining dynamic volumens list
       set_fact:
         lvm_volumes:
           - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
@@ -142,7 +141,7 @@
           - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u05vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
           - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u06vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
 
-    - name: Utworzenie punktów LVM i montowanie
+    - name: Creating and mounting LVMs
       block:
         - file: path="{{ item.mount }}" state=directory mode='0755'
           loop: "{{ lvm_volumes }}"
@@ -155,7 +154,7 @@
         - mount: path="{{ item.mount }}" src="/dev/{{ item.vg }}/{{ item.lv }}" fstype=xfs opts=defaults state=mounted
           loop: "{{ lvm_volumes }}"
 
-    - name: Konfiguracja katalogów pod bazę
+    - name: Adding directories
       file:
         path: "{{ item }}"
         owner: oracle
@@ -164,6 +163,7 @@
         mode: '0775'
         recurse: yes
       loop:
+        - "{{ dir_db_home }}"
         - "{{ dir_ora_inventory }}"
         - "{{ dir_db_logs }}/oradata"
         - "{{ dir_db_logs }}/fast_recovery_area"
@@ -174,15 +174,16 @@
         - "{{ dir_pdb2 }}"
         - "{{ dir_pdb3 }}"
         - "{{ dir_db_mirr }}/oradata"
+        - "{{ dir_db_mirr }}/oradata/{{ name_cdb }}"
         - "{{ dir_db_mirr }}/archivelog"
 
-    - name: Pobranie systemowych ID
+    - name: Gathering IDs
       command: id -{{ item }} oracle
       register: ids
       loop: ['u', 'g']
       changed_when: false
 
-    - name: Montowanie S3 Golden i Backup
+    - name: Mounting S3 buckets 
       block:
         - modprobe: name=fuse state=present
         - file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775'
@@ -191,17 +192,20 @@
         - mount: path="{{ dir_db_backup }}" src="{{ s3_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
         - mount: path="{{ dir_s3_golden_mount }}" src="{{ s3_golden_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
 
-    # ================== 3. INSTALACJA RDBMS (SE2) ==================
-    - name: Utworzenie struktury pod DB Home
+    - name: Adding directories for backup
       file:
-        path: "{{ dir_db_home }}"
+        path: "{{ item }}"
         owner: oracle
         group: oinstall
         state: directory
         mode: '0775'
         recurse: yes
+      loop:
+        - "{{ dir_db_backup }}"
+        - "{{ dir_db_backup }}/{{ name_cdb }}/rman_backups"
+        - "{{ dir_db_backup }}/{{ name_cdb }}/autobackup"
 
-    - name: Rozpakowanie binarek bazy danych
+    - name: Unzip DB home 19.3.0
       unarchive:
         src: "{{ dir_s3_golden_mount }}/LINUX.X64_193000_db_home.zip"
         dest: "{{ dir_db_home }}"
@@ -211,7 +215,7 @@
       args:
         creates: "{{ dir_db_home }}/bin/sqlplus"
 
-    - name: Cicha instalacja RDBMS (Software Only)
+    - name: Silent db engine installation 19.3.0
       become_user: oracle
       shell: |
         {{ dir_db_home }}/runInstaller -silent -waitforcompletion -ignorePrereqFailure \
@@ -234,7 +238,7 @@
         creates: "{{ dir_db_home }}/.ansible_db_installed"
         executable: /bin/bash
 
-    - name: Wykonanie skryptów root.sh
+    - name: Executing root.sh for db
       shell: "{{ item }}"
       loop:
         - "{{ dir_ora_inventory }}/orainstRoot.sh"
@@ -242,8 +246,7 @@
       args:
         creates: "/etc/oratab"
 
-    # ================== 4. BAZA KONTENEROWA I 3x PDB ==================
-    - name: Tworzenie instancji CDB
+    - name: Creating CDB 
       become_user: oracle
       shell: |
         {{ dir_db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc \
@@ -256,7 +259,7 @@
       args:
         creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump"
 
-    - name: Utworzenie 3 instancji PDB
+    - name: Adding 3 PDB to CDB
       become_user: oracle
       shell: |
         source ~/.bash_profile
@@ -274,11 +277,10 @@
       args:
         executable: /bin/bash
 
-    - name: Konfiguracja domyślnych parametrów RMAN
+    - name: Configuring RMAN
       become_user: oracle
       shell: |
         source ~/.bash_profile
-        mkdir -p {{ dir_db_backup }}/{{ name_cdb }}/rman_backups {{ dir_db_backup }}/{{ name_cdb }}/autobackup
         rman target / <<EOF
         CONFIGURE DEFAULT DEVICE TYPE TO DISK;
         CONFIGURE CONTROLFILE AUTOBACKUP ON;
@@ -293,11 +295,10 @@
       args:
         executable: /bin/bash
 
-    - name: Konfiguracja mirroringu plików kontrolnych i logów redo 
+    - name: Configuring mirrors files and logs files
       become_user: oracle
       shell: |
         source ~/.bash_profile
-        mkdir -p {{ dir_db_mirr }}/oradata/{{ name_cdb }}
         
         sqlplus -s / as sysdba <<EOF
         ALTER SYSTEM SET control_files='{{ dir_db_logs }}/oradata/{{ name_cdb }}/control01.ctl', '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/control02.ctl' SCOPE=SPFILE;
