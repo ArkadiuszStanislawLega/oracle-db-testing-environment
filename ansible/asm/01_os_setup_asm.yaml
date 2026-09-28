@@ -386,8 +386,13 @@
         source ~/.bash_profile
         sqlplus -s / as sysdba <<EOF
         ALTER SYSTEM SET audit_file_dest='{{ dir_db_logs }}/app/oracle/audit' SCOPE=SPFILE;
+        ALTER SYSTEM SET diagnostic_dest='{{ dir_db_logs }}/app/oracle' SCOPE=SPFILE;
         SHUTDOWN IMMEDIATE;
-        STARTUP;
+
+        STARTUP MOUNT;
+        ALTER DATABASE ARCHIVELOG;
+        ALTER DATABASE OPEN;
+
         EXIT;
         EOF
       args:
