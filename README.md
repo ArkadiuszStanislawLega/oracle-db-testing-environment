@@ -1,6 +1,6 @@
 # oracle-db-testing-environment
 
-Test automation for Oracle databases on AWS – CDB + ASM + S3.
+Test automation for Oracle databases 19c on AWS – CDB + ASM + S3.
 
 Setting up the infrastructure for Oracle database testing involves creating an S3 bucket for backups and an S3 bucket for installation and recovery files (including test data files).
 
@@ -31,7 +31,7 @@ When the infrastructure is deleted, the backup bucket is removed, whereas the bu
 ## Structure 
 
 - u01 - binaries
-- u02 - logs 
+- u02 - logs + CDB files
 - u03 - s3 backup 
 - u04 - mirrors 
 - u05 - pdb1 
