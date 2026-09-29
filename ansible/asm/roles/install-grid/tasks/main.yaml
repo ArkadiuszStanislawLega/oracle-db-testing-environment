@@ -1,0 +1,78 @@
+---
+- name: Unzip Grid binaries
+  unarchive: src="{{ grid_zip_src }}" dest="{{ dir_grid_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ dir_grid_home }}/gridSetup.sh"
+
+- name: Installing cvuqdisk
+  dnf: name="{{ dir_grid_home }}/cv/rpm/cvuqdisk-1.0.10-1.rpm" state=present disable_gpg_check=yes
+  environment: { CVUQDISK_GRP: "oinstall" }
+
+- name: Creating Grid Setup conifguration
+  copy:
+    dest: "{{ grid_config_install}}"
+    owner: oracle
+    group: oinstall
+    content: |
+      oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+      oracle.install.option=HA_CONFIG
+      ORACLE_BASE={{ dir_oracle_base }}
+      INVENTORY_LOCATION={{ dir_ora_inventory }}
+      oracle.install.asm.OSDBA=asmdba
+      oracle.install.asm.OSOPER=asmoper
+      oracle.install.asm.OSASM=asmadmin
+      oracle.install.asm.diskGroup.name=DATA
+      oracle.install.asm.diskGroup.redundancy=EXTERNAL
+      oracle.install.asm.diskGroup.AUSize=4
+      oracle.install.asm.diskGroup.diskDiscoveryString=/dev/nvme*
+      oracle.install.asm.diskGroup.disks={{ asm_data_list }}
+      oracle.install.asm.configureGIMRDataDG=false
+      oracle.install.asm.monitorPassword={{ passwords }}
+      oracle.install.asm.SYSASMPassword={{ passwords }}
+
+- name: Runing Grid Setup
+  become_user: oracle
+  command: "{{ dir_grid_home }}/gridSetup.sh -silent -waitforcompletion -responseFile {{ grid_config_install }} -ignorePrereqFailure"
+  environment: { CV_ASSUME_DISTID: "OEL7.6" }
+  register: grid_setup_output
+  failed_when: grid_setup_output.rc not in [0, 6]
+  args: { creates: "{{ dir_ora_inventory }}/orainstRoot.sh" }
+
+- name: Executing orainstRoot.sh
+  command: "{{ dir_ora_inventory }}/orainstRoot.sh"
+  args: { creates: "/etc/oraInst.loc" }
+
+- name: Injecting environment variable to ssystemd
+  command: systemctl set-environment CV_ASSUME_DISTID=OEL7.6
+  changed_when: true
+
+- name: Shutting down SELinux pernamently in config file
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: '^SELINUX='
+    line: SELINUX=permissive
+
+- name: Shutting down SELinux
+  shell: setenforce 0
+  failed_when: false
+
+- name: Executing root.sh for Grid
+  command: "{{ dir_grid_home }}/root.sh"
+  environment: { CV_ASSUME_DISTID: "OEL7.6" }
+  args: { creates: "/etc/oracle/olr.loc" }
+
+- name: Running gridSetup.sh
+  become_user: oracle
+  command: "{{ dir_grid_home }}/gridSetup.sh -executeConfigTools -silent -responseFile {{ grid_config_install }}"
+  environment: { CV_ASSUME_DISTID: "OEL7.6" }
+  register: grid_config_tools
+  failed_when: grid_config_tools.rc not in [0, 6]
+  args:
+    creates: "{{ dir_grid_home }}/network/admin/listener.ora"
+
+- name: Adding RECOVERY disk group
+  become_user: oracle
+  command: "{{ dir_grid_home }}/bin/asmca -silent -createDiskGroup -diskGroupName RECOVERY -diskList {{ asm_rec_list }} -redundancy EXTERNAL"
+  environment:
+    ORACLE_HOME: "{{ dir_grid_home }}"
+    ORACLE_SID: "+ASM"
+  register: asmca_output
+  failed_when: "asmca_output.rc != 0 and 'already exists' not in asmca_output.stdout"

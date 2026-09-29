@@ -1,0 +1,51 @@
+---
+- name: Zero to DB - Kompletny Provisioning Oracle 19c na AWS ASM
+  hosts: all
+  become: yes
+  gather_facts: no
+  vars:
+    s3_golden: "oracle-golden-images-terraform"
+    s3_backup: "oracle-test-backups-terraform-asm"
+
+    dir_mount_golden: "/golden_images"
+    dir_bin: "/u01"
+    dir_db_logs: "/u02"
+    dir_mount_backup: "/u03"
+
+    grid_zip_src: "/golden_images/LINUX.X64_193000_grid_home.zip"
+    db_zip_src: "/golden_images/LINUX.X64_193000_db_home.zip"
+
+    dir_oracle_base: "{{ dir_bin }}/app/oracle"
+    dir_ora_inventory: "{{ dir_bin }}/app/oraInventory"
+    dir_oracle_product: "{{ dir_oracle_base }}/product/19.3.0"
+    dir_grid_home: "{{ dir_oracle_product }}/grid"
+    dir_db_home: "{{ dir_oracle_product }}/dbhome_1"
+
+    db_config_install: "/home/oracle/db_install.rsp"
+    grid_config_install: "/home/oracle/grid_install.rsp"
+
+    name_cdb: "TESTCDB"
+    name_pdb: "TESTPDB"
+
+    passwords: "aoeuiAOEUI9"
+
+  pre_tasks:
+    - name: Bootstrap - Installing Python 3.9
+      raw: dnf install -y python39
+
+    - name: Switch interpreter Ansible na Pythona 3.9
+      set_fact:
+        ansible_python_interpreter: /usr/bin/python3.9
+
+    - name: Gathering facts
+      setup:  
+
+  roles: 
+    - role: install-dependencies-disks
+      tags: ["install-dependencies-disks"]
+    - role: install-grid
+      tags: ["install-grid"]
+    - role: install-db
+      tags: ["install-db"]
+    - role: configure-db
+      tags: ["configure-db"]

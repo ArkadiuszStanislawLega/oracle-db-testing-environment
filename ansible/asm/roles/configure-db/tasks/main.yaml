@@ -1,0 +1,49 @@
+---
+- name: Creating CDB+PDBs
+  become_user: oracle
+  command: >
+    {{ dir_db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc
+    -gdbname {{ name_cdb }} -sid {{ name_cdb }} -responseFile NO_VALUE -characterSet AL32UTF8
+    -sysPassword {{ passwords }} -systemPassword {{ passwords }}
+    -createAsContainerDatabase true -numberOfPDBs 3 -pdbName {{ name_pdb }}
+    -pdbAdminPassword {{ passwords }} -databaseType MULTIPURPOSE
+    -automaticMemoryManagement false -totalMemory 4096
+    -storageType ASM -diskGroupName +DATA -recoveryGroupName +RECOVERY
+    -recoveryAreaSize 8912 -asmsnmpPassword {{ passwords }}
+  args: { creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump" }
+
+- name: Configuring RMAN 
+  become_user: oracle
+  shell: |
+    source ~/.bash_profile
+    rman target / <<EOF
+    CONFIGURE DEFAULT DEVICE TYPE TO DISK;
+    CONFIGURE CONTROLFILE AUTOBACKUP ON;
+    CONFIGURE BACKUP OPTIMIZATION ON;
+    CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '{{ dir_mount_backup }}/{{ name_cdb }}/rman_backups/%d_%T_%U.bkp';
+    CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ dir_mount_backup }}/{{ name_cdb }}/autobackup/ctl_%F';
+    CONFIGURE DEVICE TYPE DISK BACKUP TYPE TO COMPRESSED BACKUPSET;
+    CONFIGURE ARCHIVELOG DELETION POLICY TO BACKED UP 1 TIMES TO DISK;
+    CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 5 DAYS;
+    EXIT;
+    EOF
+  args:
+    executable: /bin/bash
+
+- name: Configuring logs paths in DB
+  become_user: oracle
+  shell: |
+    source ~/.bash_profile
+    sqlplus -s / as sysdba <<EOF
+    ALTER SYSTEM SET audit_file_dest='{{ dir_db_logs }}/app/oracle/audit' SCOPE=SPFILE;
+    ALTER SYSTEM SET diagnostic_dest='{{ dir_db_logs }}/app/oracle' SCOPE=SPFILE;
+    SHUTDOWN IMMEDIATE;
+
+    STARTUP MOUNT;
+    ALTER DATABASE ARCHIVELOG;
+    ALTER DATABASE OPEN;
+
+    EXIT;
+    EOF
+  args:
+    executable: /bin/bash
