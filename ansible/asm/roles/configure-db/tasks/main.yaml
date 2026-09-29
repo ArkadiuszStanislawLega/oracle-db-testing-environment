@@ -1,16 +1,25 @@
 ---
-- name: Creating CDB+PDBs
+- name: Przesłanie pliku odpowiedzi dla DBCA (CDB+PDB)
+  template:
+    src: dbca_create.rsp.j2
+    dest: "{{ path_dbc_create }}" 
+    owner: oracle
+    group: oinstall
+    mode: '0600'
+
+- name: Creating CDB+PDBs via Response File
   become_user: oracle
-  command: >
-    {{ dir_db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc
-    -gdbname {{ name_cdb }} -sid {{ name_cdb }} -responseFile NO_VALUE -characterSet AL32UTF8
-    -sysPassword {{ passwords }} -systemPassword {{ passwords }}
-    -createAsContainerDatabase true -numberOfPDBs 3 -pdbName {{ name_pdb }}
-    -pdbAdminPassword {{ passwords }} -databaseType MULTIPURPOSE
-    -automaticMemoryManagement false -totalMemory 4096
-    -storageType ASM -diskGroupName +DATA -recoveryGroupName +RECOVERY
-    -recoveryAreaSize 8912 -asmsnmpPassword {{ passwords }}
-  args: { creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump" }
+  shell: |
+    source ~/.bash_profile
+    {{ dir_db_home }}/bin/dbca -silent -createDatabase -responseFile {{ path_dbc_create }}
+  args:
+    creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump"
+    executable: /bin/bash
+
+- name: Usunięcie pliku odpowiedzi z hasłami po udanej instalacji
+  file:
+    path: "{{ path_dbc_create }}"
+    state: absent
 
 - name: Configuring RMAN 
   become_user: oracle

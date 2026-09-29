@@ -2,38 +2,27 @@
 - name: Unzip db binaries
   unarchive: src="{{ db_zip_src }}" dest="{{ dir_db_home }}" owner=oracle group=oinstall remote_src=yes creates="{{ dir_db_home }}/runInstaller"
 
-- name: Creating db installation config
-  copy:
+- name: Send installation config
+  template:
+    src: db_install.rsp.j2
     dest: "{{ db_config_install }}"
     owner: oracle
     group: oinstall
-    content: |
-      oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
-      oracle.install.option=INSTALL_DB_SWONLY
-      UNIX_GROUP_NAME=oinstall
-      INVENTORY_LOCATION={{ dir_ora_inventory }}
-      ORACLE_BASE={{ dir_oracle_base }}
-      ORACLE_HOME={{ dir_db_home }}
-      oracle.install.db.InstallEdition=SE2
-      oracle.install.db.OSDBA_GROUP=dba
-      oracle.install.db.OSOPER_GROUP=oper
-      oracle.install.db.OSBACKUPDBA_GROUP=backupdba
-      oracle.install.db.OSDGDBA_GROUP=dgdba
-      oracle.install.db.OSKMDBA_GROUP=kmdba
-      oracle.install.db.OSRACDBA_GROUP=racdba
+    mode: '0600'
 
 - name: Silent installing db engine 19.3.0
   become_user: oracle
   shell: |
-    {{ dir_db_home }}/runInstaller -silent -waitforcompletion -responseFile {{ db_config_install }} -ignorePrereqFailure
+    source ~/.bash_profile
+    {{ dir_db_home }}/runInstaller -silent -responseFile {{ db_config_install }} -waitforcompletion -ignorePrereqFailure
     RC=$?
-    if [ $RC -eq 0 ] || [ $RC -eq 6 ]; then
-    touch {{ dir_db_home }}/.ansible_db_installed
-    exit 0
-    else
-    exit $RC
+    if [ $RC -eq 0 ] || [ $RC -eq 6 ]; then 
+      touch {{ dir_db_home }}/.ansible_db_installed; 
+      exit 0; 
+    else 
+      exit $RC; 
     fi
   environment: { CV_ASSUME_DISTID: "OEL7.6" }
   args:
-    creates: "{{ dir_db_home }}/.ansible_db_installed"
     executable: /bin/bash
+    creates: "{{ dir_grid_home }}/.ansible_grid_installed"

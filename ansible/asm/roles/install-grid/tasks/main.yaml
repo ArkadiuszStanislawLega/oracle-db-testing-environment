@@ -6,35 +6,30 @@
   dnf: name="{{ dir_grid_home }}/cv/rpm/cvuqdisk-1.0.10-1.rpm" state=present disable_gpg_check=yes
   environment: { CVUQDISK_GRP: "oinstall" }
 
-- name: Creating Grid Setup conifguration
-  copy:
-    dest: "{{ grid_config_install}}"
+- name: Send grid instllation config
+  template:
+    src: grid_install.rsp.j2
+    dest: "{{ grid_config_install }}"
     owner: oracle
     group: oinstall
-    content: |
-      oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
-      oracle.install.option=HA_CONFIG
-      ORACLE_BASE={{ dir_oracle_base }}
-      INVENTORY_LOCATION={{ dir_ora_inventory }}
-      oracle.install.asm.OSDBA=asmdba
-      oracle.install.asm.OSOPER=asmoper
-      oracle.install.asm.OSASM=asmadmin
-      oracle.install.asm.diskGroup.name=DATA
-      oracle.install.asm.diskGroup.redundancy=EXTERNAL
-      oracle.install.asm.diskGroup.AUSize=4
-      oracle.install.asm.diskGroup.diskDiscoveryString=/dev/nvme*
-      oracle.install.asm.diskGroup.disks={{ asm_data_list }}
-      oracle.install.asm.configureGIMRDataDG=false
-      oracle.install.asm.monitorPassword={{ passwords }}
-      oracle.install.asm.SYSASMPassword={{ passwords }}
+    mode: '0600'
 
-- name: Runing Grid Setup
+- name: Run grid setup
   become_user: oracle
-  command: "{{ dir_grid_home }}/gridSetup.sh -silent -waitforcompletion -responseFile {{ grid_config_install }} -ignorePrereqFailure"
+  shell: |
+    source ~/.bash_profile
+    {{ dir_grid_home }}/gridSetup.sh -silent -responseFile {{ grid_config_install }} -waitforcompletion -ignorePrereqFailure
+    RC=$?
+    if [ $RC -eq 0 ] || [ $RC -eq 6 ]; then 
+      touch {{ dir_grid_home }}/.ansible_grid_installed; 
+      exit 0; 
+    else 
+      exit $RC; 
+    fi
   environment: { CV_ASSUME_DISTID: "OEL7.6" }
-  register: grid_setup_output
-  failed_when: grid_setup_output.rc not in [0, 6]
-  args: { creates: "{{ dir_ora_inventory }}/orainstRoot.sh" }
+  args:
+    executable: /bin/bash
+    creates: "{{ dir_grid_home }}/.ansible_grid_installed"
 
 - name: Executing orainstRoot.sh
   command: "{{ dir_ora_inventory }}/orainstRoot.sh"

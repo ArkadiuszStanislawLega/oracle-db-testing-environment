@@ -1,0 +1,14 @@
+oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+oracle.install.option=HA_CONFIG
+ORACLE_BASE={{ dir_oracle_base }}
+INVENTORY_LOCATION={{ dir_ora_inventory }}
+oracle.install.asm.OSDBA=asmdba
+oracle.install.asm.OSOPER=asmoper
+oracle.install.asm.OSASM=asmadmin
+oracle.install.asm.diskGroup.name=DATA
+oracle.install.asm.diskGroup.redundancy=EXTERNAL
+oracle.install.asm.diskGroup.AUSize=4
+oracle.install.asm.diskGroup.diskDiscoveryString=/dev/nvme*
+oracle.install.asm.diskGroup.disks={{ asm_data_list }} 
+oracle.install.asm.monitorPassword={{ passwords }}
+oracle.install.asm.SYSASMPassword={{ passwords }}
