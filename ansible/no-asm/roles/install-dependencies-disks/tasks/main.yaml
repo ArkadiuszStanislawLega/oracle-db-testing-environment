@@ -96,9 +96,9 @@
       - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
       - { device: "{{ disks_10g.stdout_lines[0] }}", vg: "u02vg", lv: "loglv", mount: "{{ dir_db_logs }}" }
       - { device: "{{ disks_10g.stdout_lines[1] }}", vg: "u03vg", lv: "mirrlv", mount: "{{ dir_db_mirr }}" }
-      - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u04vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
-      - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u05vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
-      - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u06vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
+      - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u05vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
+      - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u06vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
+      - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u07vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
 
 - name: Creating and mounting LVMs
   block:
