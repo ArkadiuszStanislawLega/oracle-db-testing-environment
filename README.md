@@ -31,6 +31,7 @@ When the infrastructure is deleted, the backup bucket is removed, whereas the bu
 - u03 - s3 backup 
 - +DATA - 4 disks
 - +RECOVERY - 2 disks
+- SWAP - 2GB
 
 # NO-ASM
 
@@ -43,6 +44,7 @@ When the infrastructure is deleted, the backup bucket is removed, whereas the bu
 - u05 - pdb1 
 - u06 - pdb2 
 - u07 - pdb3 
+- SWAP - 2GB
 
 Ansible using example
 ```shell
