@@ -22,15 +22,32 @@
       - rlwrap
       - s3fs-fuse
       - fuse
+      - make
+      - gcc
+      - gcc-c++
+      - glibc-devel
+      - libaio-devel
+      - sysstat
     state: present
     disable_gpg_check: yes
 
+- name: Add oinstall group (Primary)
+  group: 
+    name: oinstall 
+    state: present
+
 - name: Add groups ASM i DBA
-  group: name="{{ item }}" state=present
+  group: 
+    name: "{{ item }}" 
+    state: present
   loop: [asmadmin, asmdba, asmoper, dba, oper, backupdba, dgdba, kmdba, racdba]
 
 - name: Configuring oracle user
-  user: name=oracle groups=asmadmin,asmdba,asmoper,dba,oper,backupdba,dgdba,kmdba,racdba append=yes
+  user: 
+    name: oracle 
+    group: oinstall 
+    groups: asmadmin,asmdba,asmoper,dba,oper,backupdba,dgdba,kmdba,racdba 
+    append: yes
 
 - name: Configuring environment
   block:
@@ -62,25 +79,12 @@
         content: |
           set -o vi
       loop: [ ec2-user, oracle]
-    - name: Update oracle user bashrc  
-      blockinfile:
-        path: "/home/oracle/.bashrc"
-        owner: oracle
-        group: oinstall
-        marker: "# {mark} ANSIBLE MANAGED BLOCK - ORAENV"
-        content: |
-          export ORACLE_SID={{ name_cdb }}; 
-          export ORAENV_ASK=NO 
-          unset ORACLE_BASE ORACLE_HOME; 
-          . /usr/local/bin/oraenv
-          unset ORAENV_ASK
     - name: Update oracle user bash_profile
       blockinfile:
         path: "/home/oracle/.bash_profile"
         owner: oracle
         group: oinstall
         content: |
-          if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
           export GRID_HOME={{ dir_grid_home }}
           export DB_HOME={{ dir_db_home }}
 
@@ -107,6 +111,40 @@
   shell: lsblk -dn -b -o NAME,SIZE | awk '$2 == 5368709120 {print $1}' | sort
   register: d_5g
   changed_when: false
+
+- name: Check is swap exists
+  stat:
+    path: /swapfile
+  register: swap_stat
+
+- name: Create 2GB SWAP
+  command: dd if=/dev/zero of=/swapfile bs=1M count=2048
+  when: not swap_stat.stat.exists
+
+- name: Add privilage
+  file:
+    path: /swapfile
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Inicialise SWAP
+  command: mkswap /swapfile
+  when: not swap_stat.stat.exists
+
+- name: Activate SWAP
+  command: swapon /swapfile
+  when: not swap_stat.stat.exists
+
+- name: Add SWAP to fstab
+  mount:
+    name: none
+    src: /swapfile
+    fstype: swap
+    opts: sw
+    passno: '0'
+    dump: '0'
+    state: present
 
 - name: Setting lists with disks
   set_fact:

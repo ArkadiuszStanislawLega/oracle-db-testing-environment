@@ -10,13 +10,15 @@
 - name: Creating CDB+PDBs via Response File
   become_user: oracle
   shell: |
-    source ~/.bash_profile
+    export ORACLE_BASE={{ dir_oracle_base }}
+    export ORACLE_HOME={{ dir_db_home }}
+    export ORACLE_SID={{ name_cdb }}
     {{ dir_db_home }}/bin/dbca -silent -createDatabase -responseFile {{ path_dbc_create }}
   args:
     creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump"
     executable: /bin/bash
 
-- name: Usunięcie pliku odpowiedzi z hasłami po udanej instalacji
+- name: Romeve config file
   file:
     path: "{{ path_dbc_create }}"
     state: absent

@@ -25,4 +25,8 @@
   environment: { CV_ASSUME_DISTID: "OEL7.6" }
   args:
     executable: /bin/bash
-    creates: "{{ dir_grid_home }}/.ansible_grid_installed"
+    creates: "{{ dir_db_home }}/.ansible_db_installed"
+  register: db_install_out
+  failed_when: db_install_out.rc not in [0, 6]
+
+
