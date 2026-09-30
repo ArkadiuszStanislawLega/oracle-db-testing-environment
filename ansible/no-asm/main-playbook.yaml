@@ -1,0 +1,50 @@
+---
+- name: Zero to DB - Completed Provisioning Oracle 19c SE2 - no ASM
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  pre_tasks:
+    - name: Bootstrap Python 3.9
+      raw: yum install -y python39
+      changed_when: false
+
+    - name: Gathering facts
+      setup:
+
+  vars:
+    ansible_python_interpreter: /usr/bin/python3.9
+    dir_ora_inventory: "/u01/app/oraInventory"
+    dir_oracle_base: "/u01/app/oracle"
+    dir_db_home: "/u01/app/oracle/product/19.3.0/dbhome_1"
+    
+    dir_bin: "/u01"
+    dir_u02_base: "/u02/app/oracle"
+    dir_db_logs: "/u02"
+    dir_cdb: "{{ dir_db_logs }}/oradata"
+    dir_db_mirr: "/u03"
+    dir_db_backup: "/u04"
+    dir_pdb1: "/u05/oradata"
+    dir_pdb2: "/u06/oradata"
+    dir_pdb3: "/u07/oradata"
+    dir_s3_golden_mount: "/golden_image"
+
+    s3_bucket: "oracle-test-backups-terraform"
+    s3_golden_bucket: "oracle-golden-images-terraform"
+
+    db_config_install: "/home/oracle/db_install.rsp"
+
+    passwords: "aoeuiAOEUI9"
+    name_cdb: "TESTCDB"
+    name_pdb1: "TEST1PDB"
+    name_pdb2: "TEST2PDB"
+    name_pdb3: "TEST3PDB"
+
+  roles:
+    - role: install-dependencies-disks
+      tags: ["install-dependencies-disks"]
+    - role: install-db
+      tags: ["install-db"]
+    - role: configure-db
+      tags: ["configure-db"]
+

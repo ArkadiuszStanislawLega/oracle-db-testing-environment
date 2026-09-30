@@ -1,0 +1,75 @@
+---
+- name: Creating CDB 
+  become_user: oracle
+  shell: |
+    {{ dir_db_home }}/bin/dbca -silent -createDatabase -templateName General_Purpose.dbc \
+    -gdbname {{ name_cdb }} -sid {{ name_cdb }} -responseFile NO_VALUE -characterSet AL32UTF8 \
+    -sysPassword "{{ passwords }}" -systemPassword "{{ passwords }}" \
+    -createAsContainerDatabase true -numberOfPDBs 0 \
+    -databaseType MULTIPURPOSE -automaticMemoryManagement false -totalMemory 4096 \
+    -storageType FS -datafileDestination {{ dir_db_logs }}/oradata \
+    -recoveryAreaDestination {{ dir_db_logs }}/fast_recovery_area -recoveryAreaSize 4096
+  args:
+    creates: "{{ dir_oracle_base }}/admin/{{ name_cdb }}/adump"
+
+- name: Adding 3 PDB to CDB
+  become_user: oracle
+  shell: |
+    source ~/.bash_profile
+    sqlplus -s / as sysdba <<EOF
+    CREATE PLUGGABLE DATABASE {{ name_pdb1 }} ADMIN USER pdbadmin IDENTIFIED BY "{{ passwords }}"
+      FILE_NAME_CONVERT=('{{ dir_cdb }}/{{ name_cdb }}/pdbseed/', '{{ dir_pdb1 }}/{{ name_cdb }}/{{ name_pdb1 }}/');
+    CREATE PLUGGABLE DATABASE {{ name_pdb2 }} ADMIN USER pdbadmin IDENTIFIED BY "{{ passwords }}"
+      FILE_NAME_CONVERT=('{{ dir_cdb }}/{{ name_cdb }}/pdbseed/', '{{ dir_pdb2 }}/{{ name_cdb }}/{{ name_pdb2 }}/');
+    CREATE PLUGGABLE DATABASE {{ name_pdb3 }} ADMIN USER pdbadmin IDENTIFIED BY "{{ passwords }}"
+      FILE_NAME_CONVERT=('{{ dir_cdb }}/{{ name_cdb }}/pdbseed/', '{{ dir_pdb3 }}/{{ name_cdb }}/{{ name_pdb3 }}/');
+    ALTER PLUGGABLE DATABASE ALL OPEN;
+    ALTER PLUGGABLE DATABASE ALL SAVE STATE;
+    EXIT;
+    EOF
+  args:
+    executable: /bin/bash
+
+- name: Configuring RMAN
+  become_user: oracle
+  shell: |
+    source ~/.bash_profile
+    rman target / <<EOF
+    CONFIGURE DEFAULT DEVICE TYPE TO DISK;
+    CONFIGURE CONTROLFILE AUTOBACKUP ON;
+    CONFIGURE BACKUP OPTIMIZATION ON;
+    CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '{{ dir_db_backup }}/{{ name_cdb }}/rman_backups/%d_%T_%U.bkp';
+    CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ dir_db_backup }}/{{ name_cdb }}/autobackup/ctl_%F';
+    CONFIGURE DEVICE TYPE DISK BACKUP TYPE TO COMPRESSED BACKUPSET;
+    CONFIGURE ARCHIVELOG DELETION POLICY TO BACKED UP 1 TIMES TO DISK;
+    CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 5 DAYS;
+      EXIT;
+      EOF
+    args:
+      executable: /bin/bash
+
+- name: Configuring mirrors files and logs files
+  become_user: oracle
+  shell: |
+    source ~/.bash_profile
+    
+    sqlplus -s / as sysdba <<EOF
+    ALTER SYSTEM SET control_files='{{ dir_db_logs }}/oradata/{{ name_cdb }}/control01.ctl', '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/control02.ctl' SCOPE=SPFILE;
+    ALTER SYSTEM SET audit_file_dest='{{ dir_db_logs }}/app/oracle/audit' SCOPE=SPFILE;
+    ALTER SYSTEM SET diagnostic_dest='{{ dir_db_logs }}/app/oracle' SCOPE=SPFILE;
+    
+    SHUTDOWN IMMEDIATE;
+    !cp {{ dir_db_logs }}/oradata/{{ name_cdb }}/control01.ctl {{ dir_db_mirr }}/oradata/{{ name_cdb }}/control02.ctl
+
+    STARTUP MOUNT;
+    ALTER DATABASE ARCHIVELOG;
+    ALTER DATABASE OPEN;
+    
+    ALTER DATABASE ADD LOGFILE MEMBER '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/redo01_mirror.log' TO GROUP 1;
+    ALTER DATABASE ADD LOGFILE MEMBER '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/redo02_mirror.log' TO GROUP 2;
+    ALTER DATABASE ADD LOGFILE MEMBER '{{ dir_db_mirr }}/oradata/{{ name_cdb }}/redo03_mirror.log' TO GROUP 3;
+    
+    EXIT;
+    EOF
+  args:
+    executable: /bin/bash

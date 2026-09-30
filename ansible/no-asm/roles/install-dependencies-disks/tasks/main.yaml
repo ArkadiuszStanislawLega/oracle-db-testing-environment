@@ -1,0 +1,199 @@
+---
+- name: Adding EPEL repo
+  yum:
+    name: oracle-epel-release-el8
+    state: present
+
+- name: Installing sys packages
+  yum:
+    name:
+      - oracle-database-preinstall-19c
+      - s3fs-fuse
+      - lvm2
+      - unzip
+      - vim
+      - tmux
+    state: present
+
+- name: Shutting down SELinux
+  block:
+    - lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: SELINUX=permissive
+    - shell: setenforce 0
+      failed_when: false
+
+- name: Update oracle password
+  user:
+    name: oracle
+    password: "{{ 'aoeuiAOEUI9' | password_hash('sha512') }}"
+
+- name: Configuring environment
+  block:
+    - name: Create vim config
+      copy:
+        dest: "/home/{{ item }}/.vimrc"
+        owner: "{{ item }}"
+        group: oinstall
+        content: |
+          set number
+          set relativenumber
+      loop: [ec2-user, oracle]
+    - name: Create tmux config
+      copy:
+        dest: "/home/{{ item }}/.tmux.conf"
+        owner: "{{ item }}"
+        group: oinstall
+        content: |
+          set -g mouse on
+          set -g mode-keys vi
+          bind h split-window -h -c "#{pane_current_path}"
+          bind v split-window -v -c "#{pane_current_path}"
+      loop: [ec2-user, oracle]
+    - name: Update bashrc
+      blockinfile:
+        path: "/home/{{ item }}/.bashrc"
+        owner: "{{ item }}"
+        group: oinstall
+        content: |
+          set -o vi
+      loop: [ ec2-user, oracle]
+    - name: Update bash_profile
+      blockinfile:
+        path: "/home/oracle/.bash_profile"
+        create: yes
+        owner: oracle
+        group: oinstall
+        content: |
+          if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
+          export ORACLE_SID={{ name_cdb }} 
+          export PATH=$ORACLE_HOME/bin:$PATH
+          export ORAENV_ASK=NO 
+          . /usr/local/bin/oraenv 
+          unset ORAENV_ASK'
+
+          alias ll='ls -lah'
+
+- name: Gathering info about NVMe
+  shell: lsblk -d -n -o NAME,SIZE | grep nvme
+  register: nvme_disks
+  changed_when: false
+
+- name: Get 30GB disk
+  shell: lsblk -d -n -b -o NAME,SIZE | awk '$1 != "nvme0n1" && $2 > 20000000000 {print "/dev/"$1}' | head -n 1
+  register: disk_30g
+  changed_when: false
+
+- name: Get lower than 15GB disks
+  shell: lsblk -d -n -b -o NAME,SIZE | awk '$1 != "nvme0n1" && $2 < 15000000000 {print "/dev/"$1}'
+  register: disks_10g
+  changed_when: false
+
+- name: Defining dynamic volumens list
+  set_fact:
+    lvm_volumes:
+      - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
+      - { device: "{{ disks_10g.stdout_lines[0] }}", vg: "u02vg", lv: "loglv", mount: "{{ dir_db_logs }}" }
+      - { device: "{{ disks_10g.stdout_lines[1] }}", vg: "u03vg", lv: "mirrlv", mount: "{{ dir_db_mirr }}" }
+      - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u04vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
+      - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u05vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
+      - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u06vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
+
+- name: Creating and mounting LVMs
+  block:
+    - file: path="{{ item.mount }}" state=directory mode='0755'
+      loop: "{{ lvm_volumes }}"
+    - lvg: vg="{{ item.vg }}" pvs="{{ item.device }}"
+      loop: "{{ lvm_volumes }}"
+    - lvol: vg="{{ item.vg }}" lv="{{ item.lv }}" size=100%FREE shrink=no
+      loop: "{{ lvm_volumes }}"
+    - filesystem: fstype=xfs dev="/dev/{{ item.vg }}/{{ item.lv }}"
+      loop: "{{ lvm_volumes }}"
+    - mount: path="{{ item.mount }}" src="/dev/{{ item.vg }}/{{ item.lv }}" fstype=xfs opts=defaults state=mounted
+      loop: "{{ lvm_volumes }}"
+
+- name: Adding directories
+  file:
+    path: "{{ item }}"
+    owner: oracle
+    group: oinstall
+    state: directory
+    mode: '0775'
+    recurse: yes
+  loop:
+    - "{{ dir_db_home }}"
+    - "{{ dir_ora_inventory }}"
+    - "{{ dir_db_logs }}/oradata"
+    - "{{ dir_db_logs }}/fast_recovery_area"
+    - "{{ dir_db_logs }}/backup_logs"
+    - "{{ dir_u02_base }}/diag"
+    - "{{ dir_u02_base }}/audit"
+    - "{{ dir_pdb1 }}"
+    - "{{ dir_pdb2 }}"
+    - "{{ dir_pdb3 }}"
+    - "{{ dir_db_mirr }}/oradata"
+    - "{{ dir_db_mirr }}/oradata/{{ name_cdb }}"
+    - "{{ dir_db_mirr }}/archivelog"
+
+- name: Gathering IDs
+  command: id -{{ item }} oracle
+  register: ids
+  loop: ['u', 'g']
+  changed_when: false
+
+- name: Mounting S3 buckets 
+  block:
+    - modprobe: name=fuse state=present
+    - file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775'
+      loop: ["{{ dir_s3_golden_mount }}", "{{ dir_db_backup }}"]
+    - file: src=/usr/bin/s3fs dest=/sbin/mount.s3fs state=link
+    - mount: path="{{ dir_db_backup }}" src="{{ s3_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
+    - mount: path="{{ dir_s3_golden_mount }}" src="{{ s3_golden_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
+
+- name: Adding directories for backup
+  file:
+    path: "{{ item }}"
+    owner: oracle
+    group: oinstall
+    state: directory
+    mode: '0775'
+    recurse: yes
+  loop:
+    - "{{ dir_db_backup }}"
+    - "{{ dir_db_backup }}/{{ name_cdb }}/rman_backups"
+    - "{{ dir_db_backup }}/{{ name_cdb }}/autobackup"
+
+- name: Check is swap exists
+  stat:
+    path: /swapfile
+  register: swap_stat
+
+- name: Create 2GB SWAP
+  command: dd if=/dev/zero of=/swapfile bs=1M count=2048
+  when: not swap_stat.stat.exists
+
+- name: Add privilage
+  file:
+    path: /swapfile
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Inicialise SWAP
+  command: mkswap /swapfile
+  when: not swap_stat.stat.exists
+
+- name: Activate SWAP
+  command: swapon /swapfile
+  when: not swap_stat.stat.exists
+
+- name: Add SWAP to fstab
+  mount:
+    name: none
+    src: /swapfile
+    fstype: swap
+    opts: sw
+    passno: '0'
+    dump: '0'
+    state: present

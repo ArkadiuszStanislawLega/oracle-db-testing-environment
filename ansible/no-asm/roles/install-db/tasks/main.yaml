@@ -1,0 +1,47 @@
+---
+- name: Unzip DB home 19.3.0
+  unarchive:
+    src: "{{ dir_s3_golden_mount }}/LINUX.X64_193000_db_home.zip"
+    dest: "{{ dir_db_home }}"
+    remote_src: yes
+    owner: oracle
+    group: oinstall
+  args:
+    creates: "{{ dir_db_home }}/bin/sqlplus"
+
+- name: Send installation config
+  template:
+    src: db_install.rsp.j2
+    dest: "{{ db_config_install }}"
+    owner: oracle
+    group: oinstall
+    mode: '0600'
+
+- name: Silent installing db engine 19.3.0
+  become_user: oracle
+  shell: |
+    source ~/.bash_profile
+    {{ dir_db_home }}/runInstaller -silent -responseFile {{ db_config_install }} -waitforcompletion -ignorePrereqFailure
+    RC=$?
+    if [ $RC -eq 0 ] || [ $RC -eq 6 ]; then 
+      touch {{ dir_db_home }}/.ansible_db_installed; 
+      exit 0; 
+    else 
+      exit $RC; 
+    fi
+  environment: { CV_ASSUME_DISTID: "OEL7.6" }
+  args:
+    executable: /bin/bash
+    creates: "{{ dir_db_home }}/.ansible_db_installed"
+  register: db_install_out
+  failed_when: db_install_out.rc not in [0, 6]
+
+- name: Executing root.sh for db
+  shell: "{{ item }}"
+  loop:
+    - "{{ dir_ora_inventory }}/orainstRoot.sh"
+    - "{{ dir_db_home }}/root.sh"
+  args:
+    creates: "/etc/oratab"
+
+
