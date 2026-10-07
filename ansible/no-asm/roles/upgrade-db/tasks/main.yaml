@@ -1,0 +1,90 @@
+---
+- name: Update OPatch
+  unarchive:
+    src: "{{ dir_s3_golden_mount }}/p6880880_190000_Linux-x86-64.zip"
+    dest: "{{ dir_db_home }}"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+    extra_opts: ['-o']
+
+- name: Create staging directory
+  file:
+    path: "/u01/patch_stage"
+    state: directory
+    owner: oracle
+    group: oinstall
+
+- name: Unzip RU 19.31
+  unarchive:
+    src: "{{ dir_s3_golden_mount }}/p39034528_190000_Linux-x86-64.zip"
+    dest: "/u01/patch_stage"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+
+- name: Apply Database RU
+  become_user: oracle
+  shell: |
+    export ORACLE_HOME={{ dir_db_home }}
+    export PATH=$ORACLE_HOME/OPatch:$PATH
+    opatch apply -silent
+  args:
+    chdir: "/u01/patch_stage/39034528" 
+    executable: /bin/bash
+  register: opatch_dbru
+  failed_when: > 
+    'OPatch succeeded' not in opatch_dbru.stdout and
+    'already been applied' not in opatch_dbru.stdout and
+    'already installed' not in opatch_dbru.stdout
+
+- name: Unzip OJVM Release Update
+  unarchive:
+    src: "{{ dir_s3_golden_mount }}/p38906621_190000_Linux-x86-64.zip"
+    dest: "/u01/patch_stage"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+
+- name: Apply OJVM RU
+  become_user: oracle
+  shell: |
+    export ORACLE_HOME={{ dir_db_home }}
+    export PATH=$ORACLE_HOME/OPatch:$PATH
+    opatch apply -silent
+  args:
+    chdir: "/u01/patch_stage/38906621"
+    executable: /bin/bash
+  register: opatch_ojvm
+  failed_when: > 
+    'OPatch succeeded' not in opatch_dbru.stdout and
+    'already been applied' not in opatch_dbru.stdout and
+    'already installed' not in opatch_dbru.stdout
+  
+- name: Unzip JDK Bundle Patch
+  unarchive:
+    src: "{{ dir_s3_golden_mount }}/p39791916_190000_Linux-x86-64.zip"
+    dest: "/u01/patch_stage"
+    owner: oracle
+    group: oinstall
+    remote_src: yes
+
+- name: Aplikowanie JDK Patch (OPatch apply)
+  become_user: oracle
+  shell: |
+    export ORACLE_HOME={{ dir_db_home }}
+    export PATH=$ORACLE_HOME/OPatch:$PATH
+    opatch apply -silent
+  args:
+    chdir: "/u01/patch_stage/39791916"
+    executable: /bin/bash
+  register: opatch_jdk
+  failed_when: > 
+    'OPatch succeeded' not in opatch_dbru.stdout and
+    'already been applied' not in opatch_dbru.stdout and
+    'already installed' not in opatch_dbru.stdout
+
+- name: Clear staging directory
+  file:
+    path: "/u01/patch_stage"
+    state: absent

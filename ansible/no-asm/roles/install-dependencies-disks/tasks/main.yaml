@@ -13,6 +13,7 @@
       - unzip
       - vim
       - tmux
+      - perl
     state: present
 
 - name: Shutting down SELinux

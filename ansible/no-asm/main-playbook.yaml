@@ -28,6 +28,7 @@
     dir_pdb2: "/u06/oradata"
     dir_pdb3: "/u07/oradata"
     dir_s3_golden_mount: "/golden_image"
+    dir_target_db_home: "{{ dir_oracle_base }}/product/19.31.0/dbhome_1"
 
     s3_bucket: "oracle-test-backups-terraform"
     s3_golden_bucket: "oracle-golden-images-terraform"
@@ -45,6 +46,8 @@
       tags: ["install-dependencies-disks"]
     - role: install-db
       tags: ["install-db"]
+    - role: upgrade-db
+      tags: ["upgrade-db"]
     - role: configure-db
       tags: ["configure-db"]
 
