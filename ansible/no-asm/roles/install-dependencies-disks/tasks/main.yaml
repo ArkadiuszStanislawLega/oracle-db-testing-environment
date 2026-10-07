@@ -72,7 +72,7 @@
           export PATH=$ORACLE_HOME/bin:$PATH
           export ORAENV_ASK=NO 
           . /usr/local/bin/oraenv 
-          unset ORAENV_ASK'
+          unset ORAENV_ASK
 
           alias ll='ls -lah'
 
