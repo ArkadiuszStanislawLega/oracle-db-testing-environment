@@ -14,7 +14,30 @@ provider "aws" {
 resource "aws_s3_bucket" "oracle_test_backups" {
   bucket        = "oracle-test-backups-terraform" 
   force_destroy = true
+  object_lock_enabled = true
 }
+
+resource "aws_s3_bucket_versioning" "oracle_test_backups_versioning" {
+  bucket = aws_s3_bucket.oracle_test_backups.id
+  
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_object_lock_configuration" "oracle_test_backups_worm" {
+  depends_on = [aws_s3_bucket_versioning.oracle_test_backups_versioning]
+  
+  bucket = aws_s3_bucket.oracle_test_backups.id
+
+  rule {
+    default_retention {
+      mode = "GOVERNANCE" 
+      days = 1
+    }
+  }
+}
+
 
 resource "aws_iam_role" "ec2_s3_role" {
   name = "oracle_ec2_s3_role"
