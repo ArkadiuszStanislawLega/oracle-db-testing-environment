@@ -118,7 +118,7 @@ resource "aws_instance" "oracle_db" {
   iam_instance_profile = aws_iam_instance_profile.ec2_s3_profile.name
 
   root_block_device {
-    volume_size = 20
+    volume_size = 50
     volume_type = "gp3"
   }
 
@@ -127,81 +127,31 @@ resource "aws_instance" "oracle_db" {
   }
 }
 
-resource "aws_ebs_volume" "u01_binaries" {
-  availability_zone = aws_instance.oracle_db.availability_zone
-  size              = 50
-  type              = "gp3"
-  tags = { Name = "Oracle-u01-Binaries" }
+locals {
+  ebs_volumes = {
+    u01_binaries = { size = 50, device = "/dev/sdb", tag = "Oracle-u01-Binaries" }
+    u02_logs     = { size = 10, device = "/dev/sdc", tag = "Oracle-u02-logs" }
+    u03_mirr     = { size = 10, device = "/dev/sdd", tag = "Oracle-u03-mirr" }
+    u05_pdb1     = { size = 10, device = "/dev/sde", tag = "Oracle-u05-pdb1" }
+    u06_pdb2     = { size = 10, device = "/dev/sdf", tag = "Oracle-u06-pdb2" }
+    u07_pdb3     = { size = 10, device = "/dev/sdg", tag = "Oracle-u07-pdb3" }
+  }
 }
 
-resource "aws_ebs_volume" "u02_logs" {
+resource "aws_ebs_volume" "oracle_volumes" {
+  for_each          = local.ebs_volumes
   availability_zone = aws_instance.oracle_db.availability_zone
-  size              = 10
+  size              = each.value.size
   type              = "gp3"
-  tags = { Name = "Oracle-u02-logs" }
+
+  tags = {
+    Name = each.value.tag
+  }
 }
 
-resource "aws_ebs_volume" "u03_mirr" {
-  availability_zone = aws_instance.oracle_db.availability_zone
-  size              = 10
-  type              = "gp3"
-  tags = { Name = "Oracle-u03-mirr" }
-}
-
-resource "aws_ebs_volume" "u05_pdb1" {
-  availability_zone = aws_instance.oracle_db.availability_zone
-  size              = 10
-  type              = "gp3"
-  tags = { Name = "Oracle-u05-pdb1" }
-}
-
-resource "aws_ebs_volume" "u06_pdb2" {
-  availability_zone = aws_instance.oracle_db.availability_zone
-  size              = 10
-  type              = "gp3"
-  tags = { Name = "Oracle-u06-pdb2" }
-}
-
-resource "aws_ebs_volume" "u07_pdb3" {
-  availability_zone = aws_instance.oracle_db.availability_zone
-  size              = 10
-  type              = "gp3"
-  tags = { Name = "Oracle-u07-pdb3" }
-}
-
-resource "aws_volume_attachment" "attach_u01" {
-  device_name = "/dev/sdb"
-  volume_id   = aws_ebs_volume.u01_binaries.id
+resource "aws_volume_attachment" "oracle_attachments" {
+  for_each    = local.ebs_volumes
+  device_name = each.value.device
+  volume_id   = aws_ebs_volume.oracle_volumes[each.key].id
   instance_id = aws_instance.oracle_db.id
 }
-
-resource "aws_volume_attachment" "attach_u02" {
-  device_name = "/dev/sdc"
-  volume_id   = aws_ebs_volume.u02_logs.id
-  instance_id = aws_instance.oracle_db.id
-}
-
-resource "aws_volume_attachment" "attach_u03" {
-  device_name = "/dev/sdd"
-  volume_id   = aws_ebs_volume.u03_mirr.id
-  instance_id = aws_instance.oracle_db.id
-}
-
-resource "aws_volume_attachment" "attach_u04" {
-  device_name = "/dev/sde"
-  volume_id   = aws_ebs_volume.u05_pdb1.id
-  instance_id = aws_instance.oracle_db.id
-}
-
-resource "aws_volume_attachment" "attach_u05" {
-  device_name = "/dev/sdf"
-  volume_id   = aws_ebs_volume.u06_pdb2.id
-  instance_id = aws_instance.oracle_db.id
-}
-
-resource "aws_volume_attachment" "attach_u06" {
-  device_name = "/dev/sdg"
-  volume_id   = aws_ebs_volume.u07_pdb3.id
-  instance_id = aws_instance.oracle_db.id
-}
-
