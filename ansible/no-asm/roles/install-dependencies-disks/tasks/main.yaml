@@ -8,7 +8,7 @@
   yum:
     name:
       - oracle-database-preinstall-19c
-      - s3fs-fuse
+      - awscli
       - lvm2
       - unzip
       - vim
@@ -97,9 +97,9 @@
       - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
       - { device: "{{ disks_10g.stdout_lines[0] }}", vg: "u02vg", lv: "loglv", mount: "{{ dir_db_logs }}" }
       - { device: "{{ disks_10g.stdout_lines[1] }}", vg: "u03vg", lv: "mirrlv", mount: "{{ dir_db_mirr }}" }
-      - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u05vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
-      - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u06vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
-      - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u07vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
+      - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u04vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
+      - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u05vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
+      - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u06vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
 
 - name: Creating and mounting LVMs
   block:
@@ -136,34 +136,26 @@
     - "{{ dir_db_mirr }}/oradata"
     - "{{ dir_db_mirr }}/oradata/{{ name_cdb }}"
     - "{{ dir_db_mirr }}/archivelog"
+    - "{{ dir_patch_stage }}"
+
+- name: Download binaries
+  ansible.builtin.command:
+    cmd: "aws s3 cp s3://{{ s3_golden_bucket }}/{{ item }} {{ dir_patch_stage }}/{{ item }}"
+    creates: "{{ dir_patch_stage }}/{{ item }}"
+  become: true
+  become_user: oracle
+  loop:
+    - LINUX.X64_193000_db_home.zip
+    - p6880880_190000_Linux-x86-64.zip
+    - p39034528_190000_Linux-x86-64.zip
+    - p38906621_190000_Linux-x86-64.zip
+    - p39791916_190000_Linux-x86-64.zip
 
 - name: Gathering IDs
   command: id -{{ item }} oracle
   register: ids
   loop: ['u', 'g']
   changed_when: false
-
-- name: Mounting S3 buckets 
-  block:
-    - modprobe: name=fuse state=present
-    - file: path="{{ item }}" state=directory owner=oracle group=oinstall mode='0775'
-      loop: ["{{ dir_s3_golden_mount }}", "{{ dir_db_backup }}"]
-    - file: src=/usr/bin/s3fs dest=/sbin/mount.s3fs state=link
-    - mount: path="{{ dir_db_backup }}" src="{{ s3_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
-    - mount: path="{{ dir_s3_golden_mount }}" src="{{ s3_golden_bucket }}" fstype=s3fs opts="_netdev,allow_other,iam_role=auto,url=https://s3.eu-central-1.amazonaws.com,endpoint=eu-central-1,uid={{ ids.results[0].stdout }},gid={{ ids.results[1].stdout }},umask=022,connect_timeout=5,retries=3" state=mounted
-
-- name: Adding directories for backup
-  file:
-    path: "{{ item }}"
-    owner: oracle
-    group: oinstall
-    state: directory
-    mode: '0775'
-    recurse: yes
-  loop:
-    - "{{ dir_db_backup }}"
-    - "{{ dir_db_backup }}/{{ name_cdb }}/rman_backups"
-    - "{{ dir_db_backup }}/{{ name_cdb }}/autobackup"
 
 - name: Check is swap exists
   stat:

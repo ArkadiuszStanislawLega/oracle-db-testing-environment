@@ -14,21 +14,21 @@
 
   vars:
     ansible_python_interpreter: /usr/bin/python3.9
+    database_version: "19.31.0"
     dir_ora_inventory: "/u01/app/oraInventory"
     dir_oracle_base: "/u01/app/oracle"
-    dir_db_home: "/u01/app/oracle/product/19.31.0/dbhome"
+    dir_db_home: "/u01/app/oracle/product/{{ database_version }}/dbhome"
     
     dir_bin: "/u01"
     dir_u02_base: "/u02/app/oracle"
     dir_db_logs: "/u02"
     dir_cdb: "{{ dir_db_logs }}/oradata"
     dir_db_mirr: "/u03"
-    dir_db_backup: "/u04"
-    dir_pdb1: "/u05/oradata"
-    dir_pdb2: "/u06/oradata"
-    dir_pdb3: "/u07/oradata"
-    dir_s3_golden_mount: "/golden_image"
-    dir_target_db_home: "{{ dir_oracle_base }}/product/19.31.0/dbhome"
+    dir_pdb1: "/u04/oradata"
+    dir_pdb2: "/u05/oradata"
+    dir_pdb3: "/u06/oradata"
+    dir_target_db_home: "{{ dir_oracle_base }}/product/{{ database_version }}/dbhome"
+    dir_patch_stage: "/u01/patch_stage"
 
     s3_bucket: "oracle-test-backups-terraform"
     s3_golden_bucket: "oracle-golden-images-terraform"

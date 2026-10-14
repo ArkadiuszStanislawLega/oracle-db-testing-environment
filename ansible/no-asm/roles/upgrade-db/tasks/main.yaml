@@ -1,90 +1,99 @@
 ---
-- name: Update OPatch
-  unarchive:
-    src: "{{ dir_s3_golden_mount }}/p6880880_190000_Linux-x86-64.zip"
+- name: Set upgrade variables and patch dispatcher list
+  ansible.builtin.set_fact:
+    opatch_zip: "p6880880_190000_Linux-x86-64.zip"
+    opatch_min_version: "12.2.0.1.49"
+    oracle_patches:
+      - name: "Database RU 19.31"
+        patch_id: "39034528"
+        zip_file: "p39034528_190000_Linux-x86-64.zip"
+      - name: "OJVM RU 19.31"
+        patch_id: "38906621"
+        zip_file: "p38906621_190000_Linux-x86-64.zip"
+
+- name: Guard Clause - Check current OPatch version
+  ansible.builtin.command: "{{ dir_db_home }}/OPatch/opatch version"
+  register: opatch_current_check
+  changed_when: false
+  failed_when: false
+  become: true
+  become_user: oracle
+
+- name: Remove legacy OPatch directory before extraction
+  ansible.builtin.file:
+    path: "{{ dir_db_home }}/OPatch"
+    state: absent
+  become: true
+  become_user: oracle
+  when: opatch_min_version not in opatch_current_check.stdout
+
+- name: Extract latest OPatch directly into ORACLE_HOME
+  ansible.builtin.unarchive:
+    src: "{{ dir_patch_stage }}/{{ opatch_zip }}"
     dest: "{{ dir_db_home }}"
+    remote_src: true
     owner: oracle
     group: oinstall
-    remote_src: yes
-    extra_opts: ['-o']
+  become: true
+  become_user: oracle
+  when: opatch_min_version not in opatch_current_check.stdout
 
-- name: Create staging directory
-  file:
-    path: "/u01/patch_stage"
+- name: Guard Clause - Verify OPatch version post-update (Fail-Fast)
+  ansible.builtin.command: "{{ dir_db_home }}/OPatch/opatch version"
+  register: opatch_post_check
+  changed_when: false
+  become: true
+  become_user: oracle
+  failed_when: "'12.2.0.1.17' in opatch_post_check.stdout or opatch_post_check.rc != 0"
+
+- name: Create clean staging directory for unzipped patches
+  ansible.builtin.file:
+    path: "{{ dir_patch_stage }}/extracted"
     state: directory
     owner: oracle
     group: oinstall
+    mode: "0755"
+  become: true
+  become_user: oracle
 
-- name: Unzip RU 19.31
-  unarchive:
-    src: "{{ dir_s3_golden_mount }}/p39034528_190000_Linux-x86-64.zip"
-    dest: "/u01/patch_stage"
+- name: Check currently installed patches in oraInventory
+  ansible.builtin.command: "{{ dir_db_home }}/OPatch/opatch lsinventory"
+  environment:
+    ORACLE_HOME: "{{ dir_db_home }}"
+  register: opatch_inventory
+  changed_when: false
+  become: true
+  become_user: oracle
+
+- name: Unzip missing Release Updates to staging area
+  ansible.builtin.unarchive:
+    src: "{{ dir_patch_stage }}/{{ item.zip_file }}"
+    dest: "{{ dir_patch_stage }}/extracted"
+    remote_src: true
+    creates: "{{ dir_patch_stage }}/extracted/{{ item.patch_id }}"
     owner: oracle
     group: oinstall
-    remote_src: yes
-
-- name: Apply Database RU
+  become: true
   become_user: oracle
-  shell: |
-    export ORACLE_HOME={{ dir_db_home }}
-    export PATH=$ORACLE_HOME/OPatch:$PATH
-    opatch apply -silent
-  args:
-    chdir: "/u01/patch_stage/39034528" 
-    executable: /bin/bash
-  register: opatch_dbru
-  failed_when: > 
-    'OPatch succeeded' not in opatch_dbru.stdout and
-    'already been applied' not in opatch_dbru.stdout and
-    'already installed' not in opatch_dbru.stdout
+  loop: "{{ oracle_patches }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.patch_id }})"
+  when: item.patch_id not in opatch_inventory.stdout
 
-- name: Unzip OJVM Release Update
-  unarchive:
-    src: "{{ dir_s3_golden_mount }}/p38906621_190000_Linux-x86-64.zip"
-    dest: "/u01/patch_stage"
-    owner: oracle
-    group: oinstall
-    remote_src: yes
-
-- name: Apply OJVM RU
+- name: Apply missing Release Updates via OPatch
+  ansible.builtin.command:
+    cmd: "{{ dir_db_home }}/OPatch/opatch apply -silent"
+    chdir: "{{ dir_patch_stage }}/extracted/{{ item.patch_id }}"
+  environment:
+    ORACLE_HOME: "{{ dir_db_home }}"
+    PATH: "{{ dir_db_home }}/OPatch:/usr/local/bin:/bin:/usr/bin"
+  register: opatch_apply_result
+  become: true
   become_user: oracle
-  shell: |
-    export ORACLE_HOME={{ dir_db_home }}
-    export PATH=$ORACLE_HOME/OPatch:$PATH
-    opatch apply -silent
-  args:
-    chdir: "/u01/patch_stage/38906621"
-    executable: /bin/bash
-  register: opatch_ojvm
-  failed_when: > 
-    'OPatch succeeded' not in opatch_dbru.stdout and
-    'already been applied' not in opatch_dbru.stdout and
-    'already installed' not in opatch_dbru.stdout
-  
-- name: Unzip JDK Bundle Patch
-  unarchive:
-    src: "{{ dir_s3_golden_mount }}/p39791916_190000_Linux-x86-64.zip"
-    dest: "/u01/patch_stage"
-    owner: oracle
-    group: oinstall
-    remote_src: yes
-
-- name: Aplikowanie JDK Patch (OPatch apply)
-  become_user: oracle
-  shell: |
-    export ORACLE_HOME={{ dir_db_home }}
-    export PATH=$ORACLE_HOME/OPatch:$PATH
-    opatch apply -silent
-  args:
-    chdir: "/u01/patch_stage/39791916"
-    executable: /bin/bash
-  register: opatch_jdk
-  failed_when: > 
-    'OPatch succeeded' not in opatch_dbru.stdout and
-    'already been applied' not in opatch_dbru.stdout and
-    'already installed' not in opatch_dbru.stdout
-
-- name: Clear staging directory
-  file:
-    path: "/u01/patch_stage"
-    state: absent
+  loop: "{{ oracle_patches }}"
+  loop_control:
+    label: "{{ item.name }} ({{ item.patch_id }})"
+  when: item.patch_id not in opatch_inventory.stdout
+  failed_when:
+    - opatch_apply_result.rc != 0
+    - "'OPatch succeeded.' not in opatch_apply_result.stdout"

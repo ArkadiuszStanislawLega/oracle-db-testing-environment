@@ -1,7 +1,7 @@
 ---
 - name: Unzip DB home 19.3.0
   unarchive:
-    src: "{{ dir_s3_golden_mount }}/LINUX.X64_193000_db_home.zip"
+    src: "{{ dir_patch_stage }}/LINUX.X64_193000_db_home.zip"
     dest: "{{ dir_db_home }}"
     remote_src: yes
     owner: oracle
