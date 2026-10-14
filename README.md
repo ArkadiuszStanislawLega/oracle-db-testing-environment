@@ -2,7 +2,7 @@
 
 Test automation for Oracle databases 19c on AWS – CDB + ASM + S3.
 
-Setting up the infrastructure for Oracle database testing involves creating an S3 bucket for backups and an S3 bucket for installation and recovery files (including test data files).
+Setting up the infrastructure for Oracle database testing involves creating an S3 bucket for archivelog backups and an S3 bucket for installation and recovery files (including test data files).
 
 When the infrastructure is deleted, the backup bucket is removed, whereas the bucket containing installation files remains. If it is no longer needed, you must delete it manually via the AWS Console.
 
@@ -28,7 +28,6 @@ When the infrastructure is deleted, the backup bucket is removed, whereas the bu
 
 - u01 - binaries 
 - u02 - logs 
-- u03 - s3 backup 
 - +DATA - 4 disks
 - +RECOVERY - 2 disks
 - SWAP - 2GB
@@ -39,11 +38,10 @@ When the infrastructure is deleted, the backup bucket is removed, whereas the bu
 
 - u01 - binaries
 - u02 - logs + CDB files
-- u03 - s3 backup 
-- u04 - mirrors 
-- u05 - pdb1 
-- u06 - pdb2 
-- u07 - pdb3 
+- u03 - mirrors 
+- u04 - pdb1 
+- u05 - pdb2 
+- u06 - pdb3 
 - SWAP - 2GB
 
 Ansible using example
