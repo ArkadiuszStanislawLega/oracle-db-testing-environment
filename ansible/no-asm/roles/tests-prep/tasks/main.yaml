@@ -214,3 +214,286 @@
 #    minute: "0"
 #    hour: "2"
 #    job: "/home/oracle/scripts/daily_snapshot.sh"
+
+- name: Deploy PITR Canary Ledger & Verification Dispatcher
+  ansible.builtin.copy:
+    dest: "/home/oracle/scripts/pitr_ctl.sh"
+    owner: oracle
+    group: oinstall
+    mode: "0750"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+      [ ! -f "${SCRIPT_DIR}/lib_oracle_common.sh" ] && { echo "[CRITICAL] Brak ${SCRIPT_DIR}/lib_oracle_common.sh" >&2; exit 1; }
+      # shellcheck source=/home/oracle/scripts/lib_oracle_common.sh
+      source "${SCRIPT_DIR}/lib_oracle_common.sh"
+
+      readonly GROUND_TRUTH_LOG="/tmp/pitr_ground_truth.log"
+      readonly MAX_RPO_DRIFT_SECONDS=15
+
+      readonly -A PDB_STORAGE_MAP=(
+          ["PDB1"]="/u05/oradata"
+          ["PDB2"]="/u06/oradata"
+          ["PDB3"]="/u07/oradata"
+      )
+
+      usage() {
+          cat <<EOF
+      Użycie: $(basename "$0") <komenda> [argumenty]
+
+      Komendy (Dispatcher):
+        init                                 Inicjalizuje tablespace'y i tabele PITR_CANARY_LEDGER w PDB1..PDB3
+        pulse [cykle=60] [interwal_sek=5]    Generuje ciągły ruch transakcyjny (SHA-256 chain) i rotuje logi
+        verify "<YYYY-MM-DD HH24:MI:SS>"     Weryfikuje spójność PITR wszystkich 3 PDB względem zadanego czasu UTC
+      EOF
+          exit 1
+      }
+
+      assert_pdb_open() {
+          local pdb_name="${1:-}"
+          local open_mode
+          open_mode=$(printf "SET HEADING OFF FEEDBACK OFF PAGESIZE 0\nSELECT open_mode FROM v\$pdbs WHERE name = UPPER('%s');\nEXIT;\n" "$pdb_name" | sqlplus -s / as sysdba | tr -d '[:space:]')
+          [ "$open_mode" != "READWRITE" ] && die "Kontener ${pdb_name} nie jest w trybie READ WRITE (obecny stan: '${open_mode:-BRAK}')."
+      }
+
+      init_single_pdb() {
+          local pdb_name="$1"
+          local mount_dir="$2"
+          local dbf_dir="${mount_dir}/${ORACLE_SID}/${pdb_name}"
+
+          assert_pdb_open "$pdb_name"
+          mkdir -p "$dbf_dir"
+
+          log_info "[${pdb_name}] Inicjalizacja struktur audytowych PITR w ${dbf_dir}..."
+          sqlplus -s / as sysdba <<EOF >/dev/null
+          WHENEVER SQLERROR EXIT FAILURE;
+          ALTER SESSION SET CONTAINER = ${pdb_name};
+
+          DECLARE
+              v_ts_exists NUMBER;
+          BEGIN
+              SELECT COUNT(*) INTO v_ts_exists FROM dba_tablespaces WHERE tablespace_name = 'TS_PITR_CANARY';
+              IF v_ts_exists = 0 THEN
+                  EXECUTE IMMEDIATE 'CREATE TABLESPACE ts_pitr_canary DATAFILE ''${dbf_dir}/pitr_canary01.dbf'' SIZE 256M AUTOEXTEND ON NEXT 64M MAXSIZE 4G';
+              END IF;
+          END;
+          /
+
+          DECLARE
+              v_tab_exists NUMBER;
+          BEGIN
+              SELECT COUNT(*) INTO v_tab_exists FROM dba_tables WHERE owner = 'SYSTEM' AND table_name = 'PITR_CANARY_LEDGER';
+              IF v_tab_exists > 0 THEN
+                  EXECUTE IMMEDIATE 'DROP TABLE system.pitr_canary_ledger PURGE';
+              END IF;
+          END;
+          /
+
+          CREATE TABLE system.pitr_canary_ledger (
+              seq_id        NUMBER         NOT NULL,
+              pdb_name      VARCHAR2(30)   NOT NULL,
+              beat_utc      TIMESTAMP(0)   NOT NULL,
+              recorded_scn  NUMBER         NOT NULL,
+              prev_hash     VARCHAR2(64)   NOT NULL,
+              curr_hash     VARCHAR2(64)   NOT NULL,
+              io_payload    CHAR(4000)     NOT NULL,
+              CONSTRAINT pk_pitr_canary PRIMARY KEY (seq_id)
+          ) TABLESPACE ts_pitr_canary;
+
+          CREATE OR REPLACE PROCEDURE system.proc_record_pitr_beat(
+              p_out_seq  OUT NUMBER,
+              p_out_utc  OUT VARCHAR2,
+              p_out_scn  OUT NUMBER,
+              p_out_hash OUT VARCHAR2
+          ) AS
+              v_prev_seq  NUMBER := 0;
+              v_prev_hash VARCHAR2(64) := 'GENESIS_BLOCK_00000000000000000000000000000000000000000000000000';
+              v_now_utc   TIMESTAMP(0);
+              v_pdb_name  VARCHAR2(30);
+          BEGIN
+              LOCK TABLE system.pitr_canary_ledger IN EXCLUSIVE MODE;
+
+              SELECT NVL(MAX(seq_id), 0) INTO v_prev_seq FROM system.pitr_canary_ledger;
+              IF v_prev_seq > 0 THEN
+                  SELECT curr_hash INTO v_prev_hash FROM system.pitr_canary_ledger WHERE seq_id = v_prev_seq;
+              END IF;
+
+              p_out_seq  := v_prev_seq + 1;
+              v_now_utc  := CAST(SYSTIMESTAMP AT TIME ZONE 'UTC' AS TIMESTAMP(0));
+              p_out_utc  := TO_CHAR(v_now_utc, 'YYYY-MM-DD HH24:MI:SS');
+              p_out_scn  := dbms_flashback.get_system_change_number;
+              v_pdb_name := sys_context('USERENV', 'CON_NAME');
+
+              SELECT standard_hash(v_prev_hash || ':' || p_out_seq || ':' || v_pdb_name || ':' || p_out_utc, 'SHA256')
+                INTO p_out_hash
+                FROM dual;
+
+              INSERT INTO system.pitr_canary_ledger (
+                  seq_id, pdb_name, beat_utc, recorded_scn, prev_hash, curr_hash, io_payload
+              ) VALUES (
+                  p_out_seq, v_pdb_name, v_now_utc, p_out_scn, v_prev_hash, p_out_hash,
+                  RPAD('PITR_BLOCK_CHURN_' || p_out_hash, 4000, 'X')
+              );
+
+              COMMIT WRITE IMMEDIATE WAIT;
+          END;
+          /
+          EXIT;
+      EOF
+          log_info "[${pdb_name}] Struktura TS_PITR_CANARY oraz rejestr SHA-256 gotowe."
+      }
+
+      cmd_init() {
+          acquire_lock "pitr_ctl"
+          local pdb_name
+          for pdb_name in "${!PDB_STORAGE_MAP[@]}"; do
+              assert_dir_exists "${PDB_STORAGE_MAP[$pdb_name]}"
+              init_single_pdb "$pdb_name" "${PDB_STORAGE_MAP[$pdb_name]}"
+          done
+          : > "$GROUND_TRUTH_LOG"
+          log_info "Inicjalizacja wszystkich 3 PDB zakończona. Log referencyjny wyczyszczony: ${GROUND_TRUTH_LOG}"
+      }
+
+      record_beat_in_pdb() {
+          local pdb_name="$1"
+          local beat_line
+          beat_line=$(sqlplus -s / as sysdba <<EOF
+          WHENEVER SQLERROR EXIT FAILURE;
+          SET HEADING OFF FEEDBACK OFF PAGESIZE 0 SERVEROUTPUT ON
+          ALTER SESSION SET CONTAINER = ${pdb_name};
+          DECLARE
+              v_seq  NUMBER;
+              v_utc  VARCHAR2(30);
+              v_scn  NUMBER;
+              v_hash VARCHAR2(64);
+          BEGIN
+              system.proc_record_pitr_beat(v_seq, v_utc, v_scn, v_hash);
+              dbms_output.put_line('BEAT_OK|' || '${pdb_name}' || '|SEQ=' || v_seq || '|UTC=' || v_utc || '|SCN=' || v_scn || '|SHA256=' || v_hash);
+          END;
+          /
+          EXIT;
+      EOF
+          )
+          echo "$beat_line" | grep "^BEAT_OK|" | tee -a "$GROUND_TRUTH_LOG"
+      }
+
+      cmd_pulse() {
+          acquire_lock "pitr_pulse"
+          local cycles="${1:-60}"
+          local interval="${2:-5}"
+          local i pdb_name
+
+          log_info "Start generatora PITR Heartbeat: cykle=${cycles}, interwał=${interval}s. Log prawdy: ${GROUND_TRUTH_LOG}"
+          for ((i = 1; i <= cycles; i++)); do
+              for pdb_name in "PDB1" "PDB2" "PDB3"; do
+                  record_beat_in_pdb "$pdb_name"
+              done
+
+              # Co 10 cykli wymuszamy przełączenie Redo Loga, aby zasilić FRA (/u08) i S3 WORM
+              if (( i % 10 == 0 )); then
+                  log_info "Cykl ${i}/${cycles}: Wymuszanie rotacji Redo Loga (ALTER SYSTEM ARCHIVE LOG CURRENT)..."
+                  printf "WHENEVER SQLERROR EXIT FAILURE;\nALTER SYSTEM ARCHIVE LOG CURRENT;\nEXIT;\n" | sqlplus -s / as sysdba >/dev/null
+              fi
+
+              sleep "$interval"
+          done
+          log_info "Generator zakończył pracę. Wygenerowano ${cycles} spójnych punktów kontrolnych w 3 PDB."
+      }
+
+      verify_single_pdb() {
+          local pdb_name="$1"
+          local target_utc="$2"
+          local report_line
+
+          assert_pdb_open "$pdb_name"
+
+          report_line=$(sqlplus -s / as sysdba <<EOF
+          WHENEVER SQLERROR EXIT FAILURE;
+          SET HEADING OFF FEEDBACK OFF PAGESIZE 0 LINESIZE 500
+          ALTER SESSION SET CONTAINER = ${pdb_name};
+
+          WITH chain_audit AS (
+              SELECT
+                  seq_id,
+                  beat_utc,
+                  recorded_scn,
+                  prev_hash,
+                  curr_hash,
+                  LAG(curr_hash, 1, 'GENESIS_BLOCK_00000000000000000000000000000000000000000000000000') OVER (ORDER BY seq_id) AS expected_prev_hash,
+                  standard_hash(
+                      LAG(curr_hash, 1, 'GENESIS_BLOCK_00000000000000000000000000000000000000000000000000') OVER (ORDER BY seq_id)
+                      || ':' || seq_id || ':' || pdb_name || ':' || TO_CHAR(beat_utc, 'YYYY-MM-DD HH24:MI:SS'),
+                      'SHA256'
+                  ) AS recalculated_hash
+              FROM system.pitr_canary_ledger
+          )
+          SELECT
+              'AUDIT_RESULT|' || '${pdb_name}'
+              || '|TOTAL_ROWS=' || COUNT(*)
+              || '|MAX_SEQ=' || NVL(MAX(seq_id), 0)
+              || '|BROKEN_LINKS=' || SUM(CASE WHEN prev_hash != expected_prev_hash OR curr_hash != recalculated_hash THEN 1 ELSE 0 END)
+              || '|FUTURE_ROWS=' || SUM(CASE WHEN beat_utc > TO_TIMESTAMP('${target_utc}', 'YYYY-MM-DD HH24:MI:SS') THEN 1 ELSE 0 END)
+              || '|LAST_UTC=' || NVL(TO_CHAR(MAX(beat_utc), 'YYYY-MM-DD HH24:MI:SS'), 'NONE')
+              || '|LAST_SCN=' || NVL(MAX(recorded_scn), 0)
+              || '|DRIFT_SEC=' || NVL(ROUND((CAST(TO_TIMESTAMP('${target_utc}', 'YYYY-MM-DD HH24:MI:SS') AS DATE) - CAST(MAX(beat_utc) AS DATE)) * 86400), 999999)
+          FROM chain_audit;
+          EXIT;
+      EOF
+          )
+
+          local clean_line
+          clean_line=$(echo "$report_line" | grep "^AUDIT_RESULT|" | tr -d '\r')
+          [ -z "$clean_line" ] && die "[${pdb_name}] Nie udało się pobrać raportu audytowego."
+
+          log_info "Surowy wektor audytu: ${clean_line}"
+
+          local total_rows max_seq broken_links future_rows drift_sec
+          total_rows=$(echo "$clean_line" | awk -F'|' '{print $3}' | cut -d= -f2)
+          max_seq=$(echo "$clean_line" | awk -F'|' '{print $4}' | cut -d= -f2)
+          broken_links=$(echo "$clean_line" | awk -F'|' '{print $5}' | cut -d= -f2)
+          future_rows=$(echo "$clean_line" | awk -F'|' '{print $6}' | cut -d= -f2)
+          drift_sec=$(echo "$clean_line" | awk -F'|' '{print $9}' | cut -d= -f2)
+
+          [ "$total_rows" -eq 0 ] && die "[${pdb_name}] FAIL: Tabela kanarkowa jest pusta!"
+          [ "$total_rows" -ne "$max_seq" ] && die "[${pdb_name}] FAIL: Wykryto lukę w sekwencji! TOTAL_ROWS (${total_rows}) != MAX_SEQ (${max_seq})."
+          [ "$broken_links" -ne 0 ] && die "[${pdb_name}] FAIL: Naruszona integralność kryptograficzna SHA-256! Uszkodzone ogniwa: ${broken_links}."
+          [ "$future_rows" -ne 0 ] && die "[${pdb_name}] FAIL: Przeciek danych z przyszłości! Znaleziono ${future_rows} wierszy po czasie docelowym ${target_utc}."
+          [ "$drift_sec" -lt 0 ] && die "[${pdb_name}] FAIL: Ujemny dryf czasu (${drift_sec}s) — baza odtworzona za daleko!"
+          [ "$drift_sec" -gt "$MAX_RPO_DRIFT_SECONDS" ] && die "[${pdb_name}] FAIL: Zbyt duży rozjazd RPO! Ostatni rekord jest starszy o ${drift_sec}s od celu (limit: ${MAX_RPO_DRIFT_SECONDS}s)."
+
+          log_info "[${pdb_name}] PASS: Spójność SHA-256 potwierdzona (${total_rows} ogniw, 0 luk, precyzja RPO: ${drift_sec}s przed celem)."
+      }
+
+      cmd_verify() {
+          local target_utc="${1:-}"
+          [ -z "$target_utc" ] && die "Komenda verify wymaga podania docelowego czasu UTC w formacie 'YYYY-MM-DD HH24:MI:SS'."
+          [[ ! "$target_utc" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] && die "Błędny format daty: '${target_utc}'. Wymagany: 'YYYY-MM-DD HH24:MI:SS'."
+
+          log_info "Rozpoczynam rygorystyczny audyt PITR względem punktu docelowego UTC: ${target_utc}"
+          local pdb_name
+          for pdb_name in "PDB1" "PDB2" "PDB3"; do
+              verify_single_pdb "$pdb_name" "$target_utc"
+          done
+          log_info "=== AUDYT PITR ZAKOŃCZONY PEŁNYM SUKCESEM WE WSZYSTKICH 3 PDB ==="
+      }
+
+      main() {
+          local action="${1:-}"
+          [ -z "$action" ] && usage
+          shift
+
+          load_environment
+          validate_prerequisites sqlplus awk grep cut
+
+          # Dispatcher Pattern - bez kaskadowych if/else
+          case "$action" in
+              init)   cmd_init "$@" ;;
+              pulse)  cmd_pulse "$@" ;;
+              verify) cmd_verify "$@" ;;
+              *)      usage ;;
+          esac
+      }
+
+      main "$@"
