@@ -1,0 +1,216 @@
+---
+- name: Ensure Oracle scripts directory exists
+  ansible.builtin.file:
+    path: "/home/oracle/scripts"
+    state: directory
+    owner: oracle
+    group: oinstall
+    mode: "0750"
+
+- name: Deploy Oracle Common Bash Library
+  ansible.builtin.copy:
+    dest: "/home/oracle/scripts/lib_oracle_common.sh"
+    owner: oracle
+    group: oinstall
+    mode: "0640" 
+    content: |
+      # shellcheck shell=bash
+      # ========================================================================
+      # Biblioteka współdzielona: /home/oracle/scripts/lib_oracle_common.sh
+      # ========================================================================
+
+      die() {
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CRITICAL] $*" >&2
+          exit 1
+      }
+
+      log_info() {
+          echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $*"
+      }
+
+      init_logging() {
+          local log_file="${1:-}"
+          [ -z "$log_file" ] && die "init_logging wymaga podania ścieżki do pliku logu."
+          exec > >(tee -a "$log_file") 2>&1
+      }
+
+      acquire_lock() {
+          local lock_name="${1:-}"
+          [ -z "$lock_name" ] && die "acquire_lock wymaga nazwy blokady."
+          local lock_file="/tmp/${lock_name}.lock"
+
+          exec 200>"$lock_file"
+          flock -n 200 || die "Proces '${lock_name}' już działa (aktywna blokada: ${lock_file}). Przerywam."
+      }
+
+      load_environment() {
+          [ "$(id -un)" != "oracle" ] && die "Skrypt musi być uruchomiony z konta oracle (bieżący: $(id -un))."
+          [ ! -f "$HOME/.bash_profile" ] && die "Brak pliku profilu: $HOME/.bash_profile."
+
+          set +u
+          # shellcheck disable=SC1091
+          source "$HOME/.bash_profile"
+          set -u
+
+          [ -z "${ORACLE_SID:-}" ] && die "Zmienna ORACLE_SID nie została wyeksportowana w .bash_profile."
+      }
+
+      validate_prerequisites() {
+          ! pgrep -f "ora_pmon_${ORACLE_SID}" >/dev/null 2>&1 && die "Instancja Oracle (${ORACLE_SID}) nie jest uruchomiona."
+
+          local cmd
+          for cmd in "$@"; do
+              ! command -v "$cmd" >/dev/null 2>&1 && die "Brak wymaganego narzędzia CLI w PATH: ${cmd}"
+          done
+      }
+
+      assert_dir_exists() {
+          local dir_path="${1:-}"
+          [ -z "$dir_path" ] && die "assert_dir_exists wymaga podania ścieżki katalogu."
+          [ ! -d "$dir_path" ] && die "Wymagany katalog nie istnieje: ${dir_path}"
+      }
+
+- name: Deploy Continuous Archivelog Sync Script
+  ansible.builtin.copy:
+    dest: "/home/oracle/scripts/sync_archivelogs.sh"
+    owner: oracle
+    group: oinstall
+    mode: "0750"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+      [ ! -f "${SCRIPT_DIR}/lib_oracle_common.sh" ] && { echo "[CRITICAL] Brak ${SCRIPT_DIR}/lib_oracle_common.sh" >&2; exit 1; }
+      # shellcheck source=/home/oracle/scripts/lib_oracle_common.sh
+      source "${SCRIPT_DIR}/lib_oracle_common.sh"
+
+      readonly S3_BUCKET="s3://{{ s3_bucket | default('oracle-test-backups-terraform') }}/archivelogs/"
+      readonly FRA_DEST="{{ dir_db_archive }}"
+
+      rotate_current_redolog() {
+          log_info "Wymuszanie archiwizacji bieżącego Redo Logu..."
+          printf "WHENEVER SQLERROR EXIT FAILURE;\nALTER SYSTEM ARCHIVE LOG CURRENT;\nEXIT;\n" | sqlplus -s / as sysdba >/dev/null
+      }
+
+      sync_fra_to_s3() {
+          log_info "Synchronizacja archivelogów z ${FRA_DEST} do ${S3_BUCKET}..."
+          aws s3 sync "$FRA_DEST" "$S3_BUCKET" \
+              --exclude "*" \
+              --include "*.arc" \
+              --include "*.dbf" \
+              --include "*.log" \
+              --only-show-errors
+      }
+
+      purge_local_fra() {
+          log_info "Czyszczenie przeterminowanych archivelogów z lokalnego wolumenu FRA..."
+          printf "CROSSCHECK ARCHIVELOG ALL;\nDELETE NOPROMPT EXPIRED ARCHIVELOG ALL;\nDELETE NOPROMPT ARCHIVELOG UNTIL TIME 'SYSDATE-1';\nEXIT;\n" | rman target / >/dev/null
+      }
+
+      main() {
+          acquire_lock "sync_archivelogs"
+          load_environment
+          validate_prerequisites sqlplus rman aws
+          assert_dir_exists "$FRA_DEST"
+          rotate_current_redolog
+          sync_fra_to_s3
+          purge_local_fra
+          log_info "Synchronizacja archivelogów zakończona sukcesem."
+      }
+
+      main "$@"
+
+- name: Deploy Daily Snapshot Orchestrator
+  ansible.builtin.copy:
+    dest: "/home/oracle/scripts/daily_snapshot.sh"
+    owner: oracle
+    group: oinstall
+    mode: "0750"
+    content: |
+      #!/bin/bash
+      set -euo pipefail
+
+      SCRIPT_DIR="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+      [ ! -f "${SCRIPT_DIR}/lib_oracle_common.sh" ] && { echo "[CRITICAL] Brak ${SCRIPT_DIR}/lib_oracle_common.sh" >&2; exit 1; }
+      # shellcheck source=/home/oracle/scripts/lib_oracle_common.sh
+      source "${SCRIPT_DIR}/lib_oracle_common.sh"
+
+      readonly LOG_FILE="/tmp/oracle_daily_snapshot_$(date +%Y%m%d).log"
+      INSTANCE_ID=""
+      REGION=""
+
+      discover_aws_metadata() {
+          log_info "Pobieranie metadanych hosta EC2 (IMDSv2)..."
+          local token
+          token=$(curl -s -f -X PUT "http://169.254.169.254/latest/api/token" \
+              -H "X-aws-ec2-metadata-token-ttl-seconds: 60") || die "Błąd autoryzacji IMDSv2."
+
+          INSTANCE_ID=$(curl -s -f -H "X-aws-ec2-metadata-token: $token" \
+              "http://169.254.169.254/latest/meta-data/instance-id") || die "Nie udało się pobrać INSTANCE_ID."
+
+          REGION=$(curl -s -f -H "X-aws-ec2-metadata-token: $token" \
+              "http://169.254.169.254/latest/meta-data/placement/region") || die "Nie udało się pobrać REGION."
+
+          [ -z "$INSTANCE_ID" ] && die "Zwrócono pusty identyfikator INSTANCE_ID."
+          [ -z "$REGION" ] && die "Zwrócono pusty identyfikator REGION."
+          log_info "Zidentyfikowano kontekst uruchomieniowy: INSTANCE_ID=${INSTANCE_ID}, REGION=${REGION}"
+      }
+
+      emergency_end_backup() {
+          local exit_code=$?
+          log_info "GUARD CLAUSE (TRAP): Awaryjne wyprowadzanie bazy z trybu Hot Backup (kod wyjścia: $exit_code)..."
+          printf "ALTER DATABASE END BACKUP;\nALTER SYSTEM ARCHIVE LOG CURRENT;\nEXIT;\n" | sqlplus -s / as sysdba >/dev/null 2>&1 || true
+          exit "$exit_code"
+      }
+
+      enable_hot_backup() {
+          log_info "Przełączanie bazy ${ORACLE_SID} w tryb BEGIN BACKUP..."
+          printf "WHENEVER SQLERROR EXIT FAILURE;\nALTER DATABASE BEGIN BACKUP;\nEXIT;\n" | sqlplus -s / as sysdba
+          trap emergency_end_backup EXIT ERR SIGINT SIGTERM
+      }
+
+      trigger_ebs_snapshots() {
+          log_info "Wyzwalanie snapshotów EBS dla wolumenów instancji ${INSTANCE_ID}..."
+          aws ec2 create-snapshots \
+              --region "$REGION" \
+              --instance-specification "InstanceId=${INSTANCE_ID},ExcludeBootVolume=true" \
+              --description "App-Consistent Backup: ${ORACLE_SID} ($(date +%Y-%m-%d))" \
+              --copy-tags-from-source volume >/dev/null
+          log_info "Zadanie utworzenia snapshotów zarejestrowane w API AWS."
+      }
+
+      disable_hot_backup() {
+          log_info "Zdejmowanie trybu Hot Backup (END BACKUP) i rotacja bieżącego Redo Logu..."
+          printf "WHENEVER SQLERROR EXIT FAILURE;\nALTER DATABASE END BACKUP;\nALTER SYSTEM ARCHIVE LOG CURRENT;\nEXIT;\n" | sqlplus -s / as sysdba
+          trap - EXIT ERR SIGINT SIGTERM
+      }
+
+      main() {
+          init_logging "$LOG_FILE"
+          acquire_lock "daily_snapshot"
+          load_environment
+          validate_prerequisites sqlplus aws curl
+          discover_aws_metadata
+          enable_hot_backup
+          trigger_ebs_snapshots
+          disable_hot_backup
+          log_info "Procedura snapshotu zakończona pełnym sukcesem."
+      }
+
+      main "$@"
+
+- name: Setup Cron for Continuous Archivelog Sync (Every 15 mins)
+  ansible.builtin.cron:
+    name: "Sync Oracle Archivelogs to S3"
+    user: oracle
+    minute: "*/15"
+    job: "/home/oracle/scripts/sync_archivelogs.sh"
+
+#- name: Setup Cron for Daily Application-Consistent Snapshot (At 02:00 AM)
+#  ansible.builtin.cron:
+#    name: "Daily Oracle EBS Snapshot"
+#    user: oracle
+#    minute: "0"
+#    hour: "2"
+#    job: "/home/oracle/scripts/daily_snapshot.sh"

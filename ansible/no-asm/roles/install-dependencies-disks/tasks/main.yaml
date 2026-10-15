@@ -81,25 +81,44 @@
   register: nvme_disks
   changed_when: false
 
-- name: Get 30GB disk
-  shell: lsblk -d -n -b -o NAME,SIZE | awk '$1 != "nvme0n1" && $2 > 20000000000 {print "/dev/"$1}' | head -n 1
-  register: disk_30g
+- name: Dispatcher - Precise Disk Discovery based on exact byte size
+  ansible.builtin.shell: |
+    lsblk -d -n -b -o NAME,SIZE | awk '
+      $1 ~ /^nvme[1-9]n1$/ {
+        if ($2 == 53687091200) print "50G:/dev/"$1
+        else if ($2 == 21474836480) print "20G:/dev/"$1
+        else if ($2 == 10737418240) print "10G:/dev/"$1
+      }'
+  register: raw_disk_layout
   changed_when: false
 
-- name: Get lower than 15GB disks
-  shell: lsblk -d -n -b -o NAME,SIZE | awk '$1 != "nvme0n1" && $2 < 15000000000 {print "/dev/"$1}'
-  register: disks_10g
-  changed_when: false
+- name: Parse and categorize disk topologies
+  ansible.builtin.set_fact:
+    disk_50g: "{{ raw_disk_layout.stdout_lines | select('match', '^50G:') | map('replace', '50G:', '') | list }}"
+    disk_20g: "{{ raw_disk_layout.stdout_lines | select('match', '^20G:') | map('replace', '20G:', '') | list }}"
+    disks_10g: "{{ raw_disk_layout.stdout_lines | select('match', '^10G:') | map('replace', '10G:', '') | list | sort }}"
 
-- name: Defining dynamic volumens list
-  set_fact:
+- name: Guard Clauses - Validate Expected Disk Topology
+  ansible.builtin.assert:
+    that:
+      - disk_50g | length == 1
+      - disk_20g | length == 1
+      - disks_10g | length == 5
+    fail_msg: >
+      [CRITICAL] Topology mismatch! Expected: 1x50G, 1x20G, 5x10G.
+      Found: 50G={{ disk_50g|length }}, 20G={{ disk_20g|length }}, 10G={{ disks_10g|length }}.
+      Synchronize your Terraform IaC configuration!
+
+- name: Defining dynamic volumes list
+  ansible.builtin.set_fact:
     lvm_volumes:
-      - { device: "{{ disk_30g.stdout }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
-      - { device: "{{ disks_10g.stdout_lines[0] }}", vg: "u02vg", lv: "loglv", mount: "{{ dir_db_logs }}" }
-      - { device: "{{ disks_10g.stdout_lines[1] }}", vg: "u03vg", lv: "mirrlv", mount: "{{ dir_db_mirr }}" }
-      - { device: "{{ disks_10g.stdout_lines[2] }}", vg: "u04vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
-      - { device: "{{ disks_10g.stdout_lines[3] }}", vg: "u05vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
-      - { device: "{{ disks_10g.stdout_lines[4] }}", vg: "u06vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
+      - { device: "{{ disk_50g[0] }}", vg: "u01vg", lv: "binlv", mount: "{{ dir_bin }}" }
+      - { device: "{{ disks_10g[0] }}", vg: "u02vg", lv: "loglv", mount: "{{ dir_db_logs }}" }
+      - { device: "{{ disks_10g[1] }}", vg: "u03vg", lv: "mirrlv", mount: "{{ dir_db_mirr }}" }
+      - { device: "{{ disk_20g[0] }}", vg: "u04vg", lv: "fralv", mount: "{{ dir_db_archive }}" } 
+      - { device: "{{ disks_10g[2] }}", vg: "u05vg", lv: "pdb1lv", mount: "{{ dir_pdb1 }}" }
+      - { device: "{{ disks_10g[3] }}", vg: "u06vg", lv: "pdb2lv", mount: "{{ dir_pdb2 }}" }
+      - { device: "{{ disks_10g[4] }}", vg: "u07vg", lv: "pdb3lv", mount: "{{ dir_pdb3 }}" }
 
 - name: Creating and mounting LVMs
   block:
@@ -137,6 +156,7 @@
     - "{{ dir_db_mirr }}/oradata/{{ name_cdb }}"
     - "{{ dir_db_mirr }}/archivelog"
     - "{{ dir_patch_stage }}"
+    - "{{ dir_db_archive }}"
 
 - name: Download binaries
   ansible.builtin.command:

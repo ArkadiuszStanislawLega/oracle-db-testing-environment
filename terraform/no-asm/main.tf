@@ -20,9 +20,10 @@ locals {
     u01_binaries = { size = 50, device = "/dev/sdb", tag = "Oracle-u01-Binaries" }
     u02_logs     = { size = 10, device = "/dev/sdc", tag = "Oracle-u02-logs" }
     u03_mirr     = { size = 10, device = "/dev/sdd", tag = "Oracle-u03-mirr" }
-    u04_pdb1     = { size = 10, device = "/dev/sde", tag = "Oracle-u04-pdb1" }
-    u05_pdb2     = { size = 10, device = "/dev/sdf", tag = "Oracle-u05-pdb2" }
-    u06_pdb3     = { size = 10, device = "/dev/sdg", tag = "Oracle-u06-pdb3" }
+    u04_archive  = { size = 20, device = "/dev/sde", tag = "Oracle-u04-archive" }
+    u05_pdb1     = { size = 10, device = "/dev/sdf", tag = "Oracle-u04-pdb1" }
+    u06_pdb2     = { size = 10, device = "/dev/sdg", tag = "Oracle-u05-pdb2" }
+    u07_pdb3     = { size = 10, device = "/dev/sdh", tag = "Oracle-u06-pdb3" }
   }
 }
 

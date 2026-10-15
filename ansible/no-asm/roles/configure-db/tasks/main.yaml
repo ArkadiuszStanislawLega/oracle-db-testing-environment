@@ -31,22 +31,26 @@
     executable: /bin/bash
 
 - name: Configuring RMAN
+  become: true
   become_user: oracle
-  shell: |
+  ansible.builtin.shell: |
     source ~/.bash_profile
     rman target / <<EOF
     CONFIGURE DEFAULT DEVICE TYPE TO DISK;
     CONFIGURE CONTROLFILE AUTOBACKUP ON;
     CONFIGURE BACKUP OPTIMIZATION ON;
-    CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '{{ dir_db_backup }}/{{ name_cdb }}/rman_backups/%d_%T_%U.bkp';
-    CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ dir_db_backup }}/{{ name_cdb }}/autobackup/ctl_%F';
+    CONFIGURE CHANNEL DEVICE TYPE DISK FORMAT '{{ dir_db_archive }}/{{ name_cdb }}/rman_backups/%d_%T_%U.bkp';
+    CONFIGURE CONTROLFILE AUTOBACKUP FORMAT FOR DEVICE TYPE DISK TO '{{ dir_db_archive }}/{{ name_cdb }}/autobackup/ctl_%F';
     CONFIGURE DEVICE TYPE DISK BACKUP TYPE TO COMPRESSED BACKUPSET;
     CONFIGURE ARCHIVELOG DELETION POLICY TO BACKED UP 1 TIMES TO DISK;
     CONFIGURE RETENTION POLICY TO RECOVERY WINDOW OF 5 DAYS;
       EXIT;
       EOF
-    args:
-      executable: /bin/bash
+  register: rman_config_result
+  failed_when: 
+    - rman_config_result.rc != 0
+    - "'ERROR MESSAGE STACK FOLLOWS' in rman_config_result.stdout"
+  changed_when: "'new RMAN configuration parameters are successfully stored' in rman_config_result.stdout"
 
 - name: Configuring mirrors files and logs files
   become_user: oracle

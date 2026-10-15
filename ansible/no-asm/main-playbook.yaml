@@ -24,9 +24,10 @@
     dir_db_logs: "/u02"
     dir_cdb: "{{ dir_db_logs }}/oradata"
     dir_db_mirr: "/u03"
-    dir_pdb1: "/u04/oradata"
-    dir_pdb2: "/u05/oradata"
-    dir_pdb3: "/u06/oradata"
+    dir_db_archive: "/04/app/oracle/fast_recovery_area"
+    dir_pdb1: "/u05/oradata"
+    dir_pdb2: "/u06/oradata"
+    dir_pdb3: "/u07/oradata"
     dir_target_db_home: "{{ dir_oracle_base }}/product/{{ database_version }}/dbhome"
     dir_patch_stage: "/u01/patch_stage"
 
@@ -50,4 +51,6 @@
       tags: ["upgrade-db"]
     - role: configure-db
       tags: ["configure-db"]
+    - role: tests-prep
+      tags: ["tests-prep"]
 
