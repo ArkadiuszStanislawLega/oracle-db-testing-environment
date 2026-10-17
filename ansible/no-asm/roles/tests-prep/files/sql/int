@@ -1,0 +1,98 @@
+WHENEVER SQLERROR EXIT SQL.SQLCODE ROLLBACK;
+WHENEVER OSERROR EXIT FAILURE ROLLBACK;
+SET SQLBLANKLINES ON VERIFY OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 300 TRIMSPOOL ON
+
+ALTER SESSION SET CONTAINER = &1;
+
+-- Explicit object privileges required for AUTHID DEFINER stored procedure compilation
+GRANT EXECUTE ON sys.dbms_flashback TO system;
+GRANT SELECT ON sys.v_$database TO system;
+
+DECLARE
+    v_ts_exists NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO v_ts_exists FROM dba_tablespaces WHERE tablespace_name = 'TS_PITR_CANARY';
+    IF v_ts_exists = 0 THEN
+        EXECUTE IMMEDIATE 'CREATE TABLESPACE ts_pitr_canary DATAFILE ''&2/pitr_canary01.dbf'' SIZE 256M REUSE AUTOEXTEND ON NEXT 64M MAXSIZE 4G';
+    END IF;
+END;
+/
+
+ALTER USER system QUOTA UNLIMITED ON ts_pitr_canary;
+
+DECLARE
+    v_tab_exists NUMBER;
+BEGIN
+    SELECT COUNT(*) INTO v_tab_exists FROM dba_tables WHERE owner = 'SYSTEM' AND table_name = 'PITR_CANARY_LEDGER';
+    IF v_tab_exists > 0 THEN
+        EXECUTE IMMEDIATE 'DROP TABLE system.pitr_canary_ledger PURGE';
+    END IF;
+END;
+/
+
+CREATE TABLE system.pitr_canary_ledger (
+    seq_id        NUMBER         NOT NULL,
+    pdb_name      VARCHAR2(30)   NOT NULL,
+    beat_utc      TIMESTAMP(0)   NOT NULL,
+    recorded_scn  NUMBER         NOT NULL,
+    prev_hash     VARCHAR2(64)   NOT NULL,
+    curr_hash     VARCHAR2(64)   NOT NULL,
+    io_payload    CHAR(4000)     NOT NULL,
+    CONSTRAINT pk_pitr_canary PRIMARY KEY (seq_id)
+) PCTFREE 10 TABLESPACE ts_pitr_canary;
+
+CREATE OR REPLACE PROCEDURE system.proc_record_pitr_beat(
+    p_out_seq  OUT NUMBER,
+    p_out_utc  OUT VARCHAR2,
+    p_out_scn  OUT NUMBER,
+    p_out_hash OUT VARCHAR2
+) AS
+    v_prev_seq  NUMBER := 0;
+    v_prev_hash VARCHAR2(64) := 'GENESIS_BLOCK_00000000000000000000000000000000000000000000000000';
+    v_now_utc   TIMESTAMP(0);
+    v_pdb_name  VARCHAR2(30);
+BEGIN
+    LOCK TABLE system.pitr_canary_ledger IN EXCLUSIVE MODE;
+
+    SELECT NVL(MAX(seq_id), 0) INTO v_prev_seq FROM system.pitr_canary_ledger;
+    IF v_prev_seq > 0 THEN
+        SELECT curr_hash INTO v_prev_hash FROM system.pitr_canary_ledger WHERE seq_id = v_prev_seq;
+    END IF;
+
+    p_out_seq  := v_prev_seq + 1;
+    v_now_utc  := CAST(SYSTIMESTAMP AT TIME ZONE 'UTC' AS TIMESTAMP(0));
+    p_out_utc  := TO_CHAR(v_now_utc, 'YYYY-MM-DD HH24:MI:SS');
+    p_out_scn  := sys.dbms_flashback.get_system_change_number;
+    v_pdb_name := sys_context('USERENV', 'CON_NAME');
+
+    SELECT standard_hash(v_prev_hash || ':' || p_out_seq || ':' || v_pdb_name || ':' || p_out_utc, 'SHA256')
+      INTO p_out_hash
+      FROM dual;
+
+    INSERT INTO system.pitr_canary_ledger (
+        seq_id, pdb_name, beat_utc, recorded_scn, prev_hash, curr_hash, io_payload
+    ) VALUES (
+        p_out_seq, v_pdb_name, v_now_utc, p_out_scn, v_prev_hash, p_out_hash,
+        RPAD('PITR_BLOCK_CHURN_' || p_out_hash, 4000, 'X')
+    );
+
+    COMMIT WRITE IMMEDIATE WAIT;
+END;
+/
+
+DECLARE
+    v_status VARCHAR2(30);
+BEGIN
+    SELECT status INTO v_status
+      FROM dba_objects
+     WHERE owner = 'SYSTEM'
+       AND object_name = 'PROC_RECORD_PITR_BEAT'
+       AND object_type = 'PROCEDURE';
+
+    IF v_status != 'VALID' THEN
+        raise_application_error(-20001, 'CRITICAL: Procedure SYSTEM.PROC_RECORD_PITR_BEAT compiled with status: ' || v_status);
+    END IF;
+END;
+/
+
+EXIT SUCCESS;

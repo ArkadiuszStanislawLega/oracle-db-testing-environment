@@ -24,7 +24,7 @@
     dir_db_logs: "/u02"
     dir_cdb: "{{ dir_db_logs }}/oradata"
     dir_db_mirr: "/u03"
-    dir_db_archive: "/04/app/oracle/fast_recovery_area"
+    dir_db_archive: "/u04/app/oracle/fast_recovery_area"
     dir_pdb1: "/u05/oradata"
     dir_pdb2: "/u06/oradata"
     dir_pdb3: "/u07/oradata"

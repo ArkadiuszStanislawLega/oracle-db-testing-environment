@@ -69,7 +69,6 @@
         content: |
           if [ -f ~/.bashrc ]; then . ~/.bashrc; fi
           export ORACLE_SID={{ name_cdb }} 
-          export PATH=$ORACLE_HOME/bin:$PATH
           export ORAENV_ASK=NO 
           . /usr/local/bin/oraenv 
           unset ORAENV_ASK
@@ -157,6 +156,7 @@
     - "{{ dir_db_mirr }}/archivelog"
     - "{{ dir_patch_stage }}"
     - "{{ dir_db_archive }}"
+    - "{{ dir_db_archive }}/{{ name_cdb }}/autobackup"
 
 - name: Download binaries
   ansible.builtin.command:

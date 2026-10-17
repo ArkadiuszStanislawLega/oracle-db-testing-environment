@@ -1,0 +1,18 @@
+WHENEVER SQLERROR EXIT SQL.SQLCODE ROLLBACK;
+WHENEVER OSERROR EXIT FAILURE ROLLBACK;
+SET SQLBLANKLINES ON VERIFY OFF FEEDBACK OFF HEADING OFF PAGESIZE 0 LINESIZE 300 TRIMSPOOL ON SERVEROUTPUT ON
+
+ALTER SESSION SET CONTAINER = &1;
+
+DECLARE
+    v_seq  NUMBER;
+    v_utc  VARCHAR2(30);
+    v_scn  NUMBER;
+    v_hash VARCHAR2(64);
+BEGIN
+    system.proc_record_pitr_beat(v_seq, v_utc, v_scn, v_hash);
+    dbms_output.put_line('BEAT_OK|&1|SEQ=' || v_seq || '|UTC=' || v_utc || '|SCN=' || v_scn || '|SHA256=' || v_hash);
+END;
+/
+
+EXIT SUCCESS;

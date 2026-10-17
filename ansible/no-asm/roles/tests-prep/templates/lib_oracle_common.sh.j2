@@ -1,0 +1,111 @@
+# shellcheck shell=bash
+# ==============================================================================
+# Shared Library: /home/oracle/scripts/lib_oracle_common.sh
+# ==============================================================================
+
+# Force strict POSIX ASCII locale for deterministic CLI parsing
+export LC_ALL=C
+export LANG=C
+
+readonly SCRIPTS_ROOT="/home/oracle/scripts"
+readonly SQL_DIR="${SCRIPTS_ROOT}/sql"
+
+# Centralized Infrastructure Constants (Single Source of Truth)
+readonly S3_BASE_URI="s3://{{ bucket_worm_name | default('oracle-test-backups-terraform') }}"
+readonly S3_ARCHIVELOG_URI="${S3_BASE_URI}/archivelogs/"
+readonly S3_AUDIT_URI="${S3_BASE_URI}/pitr_audit/pitr_ground_truth.log"
+readonly FRA_DEST="{{ dir_db_backup | default('/u02/fast_recovery_area') }}"
+#readonly FRA_DEST="{{ dir_db_backup | default('/u04/app/oracle/fast_recovery_area') }}"
+readonly GROUND_TRUTH_LOG="/tmp/pitr_ground_truth.log"
+readonly MAX_RPO_DRIFT_SECONDS=15
+
+# Deterministic Multitenant Storage Topology Contract
+readonly -a PDB_LIST=("TEST1PDB" "TEST2PDB" "TEST3PDB")
+readonly -A PDB_STORAGE_MAP=(
+    ["TEST1PDB"]="/u05/oradata/TESTCDB/TEST1PDB"
+    ["TEST2PDB"]="/u06/oradata/TESTCDB/TEST2PDB"
+    ["TEST3PDB"]="/u07/oradata/TESTCDB/TEST3PDB"
+)
+
+die() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CRITICAL] $*" >&2
+    exit 1
+}
+
+log_info() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO] $*"
+}
+
+init_logging() {
+    local log_file="${1:-}"
+    [ -n "$log_file" ] || die "init_logging requires a target log file path."
+    exec > >(tee -a "$log_file") 2>&1
+}
+
+acquire_lock() {
+    local lock_name="${1:-}"
+    [ -n "$lock_name" ] || die "acquire_lock requires a lock identifier."
+    local lock_file="/tmp/${lock_name}.lock"
+
+    exec 200>"$lock_file"
+    flock -n 200 || die "Process '${lock_name}' is already running (lock held: ${lock_file}). Aborting."
+}
+
+load_environment() {
+    [ "$(id -un)" = "oracle" ] || die "Script must be executed as 'oracle' user (current: $(id -un))."
+    [ -f "$HOME/.bash_profile" ] || die "Missing profile file: $HOME/.bash_profile."
+
+    set +eu
+    # shellcheck disable=SC1091
+    source "$HOME/.bash_profile" >/dev/null 2>&1
+    set -eu
+
+    [ -n "${ORACLE_HOME:-}" ] || die "ORACLE_HOME was not exported by .bash_profile."
+    [ -n "${ORACLE_SID:-}" ] || die "ORACLE_SID was not exported by .bash_profile."
+
+    export PATH="${ORACLE_HOME}/bin:/usr/local/bin:/usr/bin:/bin:${PATH}"
+    export NLS_LANG="AMERICAN_AMERICA.AL32UTF8"
+    export NLS_DATE_FORMAT="YYYY-MM-DD HH24:MI:SS"
+}
+
+validate_prerequisites() {
+    pgrep -f "ora_pmon_${ORACLE_SID}" >/dev/null 2>&1 || die "Oracle instance '${ORACLE_SID}' is not running (PMON not found)."
+
+    local cmd
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null 2>&1 || die "Required CLI binary is missing from PATH: ${cmd}"
+    done
+}
+
+assert_dir_exists() {
+    local dir_path="${1:-}"
+    [ -n "$dir_path" ] || die "assert_dir_exists requires a directory path."
+    [ -d "$dir_path" ] || die "Required directory does not exist: ${dir_path}"
+}
+
+run_sql_output() {
+    local sql_file="${1:-}"
+    [ -n "$sql_file" ] || die "run_sql_output requires a SQL script filename."
+    shift
+
+    local full_path="${SQL_DIR}/${sql_file}"
+    [ -f "$full_path" ] || die "SQL script not found: ${full_path}"
+
+    local output rc=0
+    output=$(sqlplus -L -s / as sysdba @"$full_path" "$@" </dev/null 2>&1) || rc=$?
+
+    if [ "$rc" -ne 0 ] || echo "$output" | grep -Eq "(ORA-[0-9]{5}|SP2-[0-9]{4}|PLS-[0-9]{5}|^ERROR:|Warning: .* compilation errors)"; then
+        echo "==================================================================" >&2
+        echo "[SQL DIAGNOSTIC DUMP] File: ${full_path} | Args: $*" >&2
+        echo "------------------------------------------------------------------" >&2
+        echo "$output" >&2
+        echo "==================================================================" >&2
+        die "SQL execution failed for '${sql_file}' (exit code=${rc})."
+    fi
+
+    printf "%s\n" "$output"
+}
+
+run_sql_quiet() {
+    run_sql_output "$@" >/dev/null
+}
