@@ -32,6 +32,9 @@
     - inspect_pitr_pdb.sql
     - verify_pitr_pdb.sql
     - db_lifecycle_op.sql
+    - status_pitr_cdb.sql
+    - harden_se2_cdb.sql
+    - resize_redo_logs.sql
     - purge_fra_archivelogs.rcv
 
 - name: Deploy Oracle Common Bash Library from template
